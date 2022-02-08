@@ -10,7 +10,7 @@ dependencies:
   - openmm >=7.6
   - openff-forcefields
   - openff-units >=0.1.4
-  - openff-utilities
+  - openff-utilities =>0.1.3
   - smirnoff99Frosst
   - numpy
   - networkx
