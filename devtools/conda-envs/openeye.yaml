@@ -17,14 +17,14 @@ dependencies:
   - coverage
   - numpy
   - networkx
-  - parmed  # ??? what ???
+  - parmed
   - openeye-toolkits
   - packaging
     # Removed until a new release which targets openff-toolkit is made.
 #  - openmmforcefields
   - openmm
   - openff-forcefields
-  - openff-units
+  - openff-units >=0.1.5
   - openff-utilities
   - smirnoff99Frosst
   - cachetools
@@ -37,6 +37,5 @@ dependencies:
   - qcportal
   - qcengine
   - mdtraj
-  - openff-interchange
   - pip:
-    - git+https://github.com/openforcefield/openff-units.git@element-module
+    - git+https://github.com/openforcefield/openff-interchange.git@v0.2.0-alpha.1

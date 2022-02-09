@@ -36,6 +36,7 @@ from collections import OrderedDict, UserDict
 from copy import deepcopy
 from typing import TYPE_CHECKING, List, Optional, Union
 
+import mendeleev
 import networkx as nx
 import numpy as np
 from openff.units import unit
@@ -4988,7 +4989,8 @@ class FrozenMolecule(Serializable):
             molecule = toolkit.from_iupac(
                 iupac_name,
                 allow_undefined_stereo=allow_undefined_stereo,
-                _cls=cls**kwargs,
+                _cls=cls,
+                **kwargs,
             )
         else:
             raise Exception(
