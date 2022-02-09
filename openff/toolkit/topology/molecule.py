@@ -36,7 +36,6 @@ from collections import OrderedDict, UserDict
 from copy import deepcopy
 from typing import TYPE_CHECKING, List, Optional, Union
 
-import mendeleev
 import networkx as nx
 import numpy as np
 from openff.units import unit
