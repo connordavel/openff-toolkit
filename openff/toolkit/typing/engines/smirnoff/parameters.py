@@ -5273,7 +5273,9 @@ class VirtualSiteHandler(_NonbondedHandler):
             # has the match setting, which ultimately decides which orientations
             # to include.
             if self.match == "once":
+                # print(f"{orientations=}")
                 key = self.transformed_dict_cls.key_transform(orientations[0])
+                # print(f"{key=}")
                 orientations = [key]
                 # else all matches wanted, so keep whatever was matched.
 
@@ -5349,6 +5351,7 @@ class VirtualSiteHandler(_NonbondedHandler):
             ref_key = self.transformed_dict_cls.key_transform(orientations[0])
             atoms = list([molecule.atoms[i] for i in ref_key])
             args = (atoms, orientations)
+            # _add_virtual_site will ONLY PROCESS the FIRST value in the list `orientations`.
             off_idx = super()._add_virtual_site(fn, *args, replace=replace)
             return off_idx
 
@@ -5799,11 +5802,25 @@ class VirtualSiteHandler(_NonbondedHandler):
                     )
                     diff_keys = key not in vsite_struct[KEY_LIST]
                     same_vsite = self._same_virtual_site_type(vs_i, vs_j)
+                    # print(f"before, {combined_orientations=}")
+                    # import ipdb; ipdb.set_trace()
 
+                    # This conditional should probably not evaluate to True while reproducing issue #1206. Each
+                    # individual thing seems reasonable enough but something about this doesn't capture the breaking
+                    # case, and it's not clear how all of the necessary information can be gathered and processed
+                    # right here in a way that fixes #1206 _and_ doesn't break other stuff.
                     if same_atoms and same_vsite and diff_keys:
-                        combined_orientations[i][KEY_LIST].append(key)
+                        # print(f"{combined_orientations=}")
+                        # combined_orientations[i][VSITE_TYPE].append(vs_i)
+                        # The last match in the atom_matches iterator takes precendence according to SMIRNOFF rules;
+                        # since only the first orientation is processed by `_add_virtual_site` later, one idea is to
+                        # simply override the other orientations with the one that' scurrently found. This might need
+                        # a match="once" conditional.
+                        combined_orientations[i][KEY_LIST] = [key]
+                        combined_orientations[i][VSITE_TYPE] = vs_i
                         found = True
 
+                    # print(f"after, {combined_orientations=}")
                     # Skip out early since there is no reason to keep
                     # searching since we will never add the same
                     # particle twice
@@ -5850,13 +5867,19 @@ class VirtualSiteHandler(_NonbondedHandler):
 
             top_mol = Topology.from_molecules([molecule])
             matches = self.find_matches(top_mol, expand_permutations=True)
-
+            # print("[k for k in matches.keys()]")
+            # print([k for k in matches.keys()])
+            # In reproducing issue #1206, this method call is where information about the " 'distance': [0.220]" virtual site
+            # type is lost.
             virtual_sites = self._reduce_virtual_particles_to_sites(matches)
+            # print("[v[1] for v in virtual_sites]")
+            # print([v[1] for v in virtual_sites])
 
             # Now handle the vsites for this molecule
             # This call batches the key tuples into a single list, in order
             # for the virtual site to represent multiple particles
             for vsite_type, orientations in virtual_sites:
+                # orientations = [orientations[0]]  # import ipdb; ipdb.set_trace()
                 vsite_type.add_virtual_site(molecule, orientations, replace=True)
 
     def _create_openmm_virtual_sites(self, system, force, topology, molecule):
