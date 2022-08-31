@@ -1290,6 +1290,119 @@ class Topology(Serializable):
 
     @classmethod
     @requires_package("openmm")
+    def from_pdb_and_monomer_info(cls, file_path, monomer_info_json = "", strict = True):
+        import networkx as nx
+        from openmm.app import PDBFile
+        from rdkit import Chem
+        from copy import deepcopy
+        import json
+
+        def _pdb_to_networkx(pdb_file):
+            """
+            Construct an OpenFF Topology object from an OpenMM Topology object.
+
+            Parameters
+            ----------
+            substructure_library : dict{str:list[str, list[str]]}
+                A dictionary of substructures. substructure_library[aa_name] = list[tagged SMARTS, list[atom_names]]
+            openmm_topology : openmm.app.Topology
+                An OpenMM Topology object
+
+            Returns
+            -------
+            omm_topology_G : networkx graph
+                A networkX graph representation of the openmm topology with chemical information added from the
+                substructure dictionary. Atoms are nodes and bonds are edges.
+                Nodes (atoms) have attributes for `atomic_number` (int) and `formal_charge` (int).
+                Edges (bonds) have attributes for `bond_order` (Chem.rdchem.BondType).
+                Any edges that are not assgined a bond order will have the value Chem.rdchem.BondType.UNSPECIFIED
+                and should be considered an error.
+            """
+            import networkx as nx
+            from openmm.app import PDBFile
+
+            pdb = PDBFile(pdb_file)
+            openmm_topology = pdb.topology
+
+            omm_topology_G = nx.Graph()
+            for atom, position in zip(openmm_topology.atoms(), pdb.positions):
+                vec = position._value
+                omm_topology_G.add_node(
+                    atom.index,
+                    pos = list(vec),
+                    pdb_atom_id = atom.index, # this remains constant throughout any index reordering
+                    atomic_number=atom.element.atomic_number,
+                    formal_charge=0.0,
+                    atom_name=atom.name,
+                    residue_name=atom.residue.name,
+                    residue_number=atom.residue.index
+                )
+
+            n_hydrogens = [0] * openmm_topology.getNumAtoms()
+            for bond in openmm_topology.bonds():
+                omm_topology_G.add_edge(
+                    bond.atom1.index,
+                    bond.atom2.index,
+                    bond_order=Chem.rdchem.BondType.UNSPECIFIED,  # bond.order
+                )
+                # omm_topology_G.add_edge(
+                #     bond.atom1.index,
+                #     bond.atom2.index,
+                #     bond_order=1,  # quick fix for now
+                # )
+                # Assign sequential negative numbers as atomic numbers for hydrogens attached to the same heavy atom.
+                # We do the same to the substructure templates that are used for matching. This saves runtime because
+                # it removes redundant self-symmetric matches.
+                if bond.atom1.element.atomic_number == 1:
+                    h_index = bond.atom1.index
+                    heavy_atom_index = bond.atom2.index
+                    n_hydrogens[heavy_atom_index] += 1
+                    omm_topology_G.nodes[h_index]["atomic_number"] = (
+                        -1 * n_hydrogens[heavy_atom_index]
+                    )
+                if bond.atom2.element.atomic_number == 1:
+                    h_index = bond.atom2.index
+                    heavy_atom_index = bond.atom1.index
+                    n_hydrogens[heavy_atom_index] += 1
+                    omm_topology_G.nodes[h_index]["atomic_number"] = (
+                        -1 * n_hydrogens[heavy_atom_index]
+                    )
+
+            # Try matching this substructure to the whole molecule graph
+            # node_match = isomorphism.categorical_node_match(
+            #     ["atomic_number", "already_matched"], [-100, False]
+            # )
+            return omm_topology_G
+
+        omm_topology_G = _pdb_to_networkx(file_path)
+
+        molecules = []
+        topology_substructures = []
+        for chain in nx.connected_components(omm_topology_G):
+            subgraph = omm_topology_G.subgraph(chain)
+            # relabel the subgraph
+            mapping = dict(zip(subgraph.nodes, range(0, len(subgraph.nodes))))
+            subgraph_reindexed = nx.relabel_nodes(subgraph, mapping)
+            reverse_mapping = dict([(j,i) for i,j in mapping.items()])
+            offmol, substructure_summary = Molecule().from_omm_topology_G(subgraph_reindexed, monomer_info_json)
+            substructure_summary = [tuple([name, [reverse_mapping[i] for i in ids], mapped]) for name, ids, mapped in substructure_summary]
+            topology_substructures += substructure_summary
+            molecules.append(offmol)
+
+        top = Topology().from_molecules(molecules)
+
+        # final check
+        error = False
+        for atom in top.atoms:
+            if not atom.metadata['already_matched']:
+                error = True
+        if strict and error:
+            return False, False, False
+        else:
+            return top, topology_substructures, error 
+
+    @classmethod
+    @requires_package("openmm")
     def from_openmm(cls, openmm_topology, unique_molecules=None):
         """
         Construct an OpenFF Topology object from an OpenMM Topology object.

@@ -3789,6 +3789,485 @@ class FrozenMolecule(Serializable):
 
     @classmethod
     @requires_package("openmm")
+    def from_omm_topology_G(cls, omm_topology_G, monomer_info_json = ""):
+        import networkx as nx
+        from networkx.algorithms import isomorphism
+        from rdkit import Chem
+        from collections import defaultdict
+        from openff.units.units import Quantity
+        import itertools
+
+        #MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM
+        #                    HELPER FUNCTIONS
+        #WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW
+        # functions responsible for 1) finding all isomorphisms of a 
+        # SINGLE rdmol in a larger structure and 2) selecting a subset
+        # of those isomorphisms that result in the best coverage of the 
+        # structure
+
+        def _rdmol_to_networkx(rdmol):
+            _bondtypes = {
+                # 0: Chem.BondType.AROMATIC,
+                Chem.BondType.SINGLE: 1,
+                Chem.BondType.AROMATIC: 1.5,
+                Chem.BondType.DOUBLE: 2,
+                Chem.BondType.TRIPLE: 3,
+                Chem.BondType.QUADRUPLE: 4,
+                Chem.BondType.QUINTUPLE: 5,
+                Chem.BondType.HEXTUPLE: 6,
+            }
+            rdmol_G = nx.Graph()
+            n_hydrogens = [0] * rdmol.GetNumAtoms()
+            for atom in rdmol.GetAtoms():
+                atomic_number = atom.GetAtomicNum()
+                # Assign sequential negative numbers as atomic numbers for hydrogens attached to the same heavy atom.
+                # We do the same to hydrogens in the protein graph. This makes it so we
+                # don't have to deal with redundant self-symmetric matches.
+                if atomic_number == 1:
+                    heavy_atom_idx = atom.GetNeighbors()[0].GetIdx()
+                    n_hydrogens[heavy_atom_idx] += 1
+                    atomic_number = -1 * n_hydrogens[heavy_atom_idx]
+                
+                rdmol_G.add_node(
+                    atom.GetIdx(),
+                    atomic_number=atomic_number,
+                    formal_charge=atom.GetFormalCharge(),
+                    map_num=atom.GetAtomMapNum()
+                )
+                # These substructures (and only these substructures) should be able to overlap previous matches.
+                # They handle bonds between substructures.
+            for bond in rdmol.GetBonds():
+                bond_type = bond.GetBondType()
+
+                # All bonds in the graph should have been explicitly assigned by this point.
+                if bond_type == Chem.rdchem.BondType.UNSPECIFIED:
+                    raise Exception
+                    # bond_type = Chem.rdchem.BondType.SINGLE
+                    # bond_type = Chem.rdchem.BondType.AROMATIC
+                    # bond_type = Chem.rdchem.BondType.ONEANDAHALF
+                rdmol_G.add_edge(
+                    bond.GetBeginAtomIdx(),
+                    bond.GetEndAtomIdx(),
+                    bond_order=_bondtypes[bond_type],
+                )
+            return rdmol_G
+
+        def _get_isomorphisms(query, structure):
+            # returns an isomorphism map using networkx from query to structure where 
+            # both query and structure are rdkit molecules 
+
+            def node_match(data1, data2):
+                if data1.get("atomic_number", -100) == 0 or data2.get("atomic_number", -100) == 0:
+                    return True
+                elif data1.get("atomic_number", -100) == data2.get("atomic_number", -100):
+                    if data1.get("atom_map", 0) == data2.get("atom_map", 0):
+                        # return true if atomic numbers match on non_captured atoms
+                        return True
+                    else:
+                        # else, captured atoms must have maching values for "already_matched"
+                        if data1.get("already_matched", False) == data2.get("already_matched", False):
+                            return True
+                        else:
+                            return False
+                else:
+                    return False
+
+            # if isinstance(structure, str):
+            #     if ".pdb" in structure or ".PDB" in structure:
+            #         rdmol_G = _rdmol_to_networkx(query)
+            #         omm_topology_G = _pdb_to_networkx(structure)
+            #         GM = isomorphism.GraphMatcher(
+            #             omm_topology_G, rdmol_G, node_match=node_match
+            #         )
+            #         return GM.subgraph_is_isomorphic(), GM.subgraph_isomorphisms_iter()
+            #     else:
+            #         return -1, -1
+            if isinstance(structure, Chem.rdchem.Mol):
+                rdmol_G = _rdmol_to_networkx(query)
+                structure_G = _rdmol_to_networkx(structure)
+                GM = isomorphism.GraphMatcher(
+                    structure_G, rdmol_G, node_match=node_match
+                )
+                return GM.subgraph_is_isomorphic(), GM.subgraph_isomorphisms_iter()
+            elif isinstance(structure, nx.classes.graph.Graph):
+                rdmol_G = _rdmol_to_networkx(query)
+                GM = isomorphism.GraphMatcher(
+                    structure, rdmol_G, node_match=node_match
+                )
+                return GM.subgraph_is_isomorphic(), GM.subgraph_isomorphisms_iter()
+            else:
+                return -1, -1
+
+        def _find_fitting_lists(isomorphism_info):
+            # return the indices of the lists that can be appended together to create a longer list
+            # with no overlapping values in those lists
+            def _reduce_matrix(queue, matrix, adjacency_list, found_isomorphisms = [], found_edges = [], favor_isomorphisms = []):
+                # searches for isomorphisms that fit together based on isomorphism adjacency info: 
+                if queue == []:
+                    return found_isomorphisms
+                v = queue.pop(0)
+                found_isomorphisms.append(v)
+                # search v for adjacent isomorphisms
+                adjacency_info = adjacency_list[v]
+                for edge_atom, cap_atom, bond_type in adjacency_info:
+                    neighbor_bond = (cap_atom, edge_atom, bond_type) # adjacent isomorphism will contain a bond with reversed indices
+                    # attempt to find the first instance of the cap_atom in neighboring isomorphisms
+                    found_iso_id = -1
+                    biggest_neighbor_size = 0
+                    for neighbor_bond_info, id in zip(adjacency_list, range(0, len(adjacency_list))):
+                        if neighbor_bond in neighbor_bond_info and id not in (found_isomorphisms + queue) and {edge_atom, cap_atom} not in found_edges:
+                            # if neighbor_bond in [(32, 31, bond_type), (34,35, bond_type), (39,40, bond_type), (39,44, bond_type)]:
+                            #     test = 1
+                            if np.any(np.squeeze(np.asarray(matrix[found_isomorphisms + [id], :].sum(axis=0))) > 1): # if there is an overlap with previous isomorphisms
+                                continue
+                            # this does solve the problem of overlapping isomorphisms, but sometimes you
+                            # actually want isomorphisms to replace previous isomorphisms that didn't work so well 
+                            # if id in favor_isomorphisms:
+                            #     found_iso_id = id
+                            #     break
+                            if matrix[id, :].sum() > biggest_neighbor_size:
+                                found_iso_id = id
+                                biggest_neighbor_size = matrix[id, :].sum()
+                            
+                            #     ####
+                            #     found_isomorphisms += favor_isomorphisms
+                            #     found_iso_id = -1
+                            #     break
+                            #     #####
+                            # else:
+                            #     found_iso_id = id
+                            # break
+                            
+                    if found_iso_id > 0:
+                        queue.append(found_iso_id)
+                        found_edges.append(set([edge_atom, cap_atom]))
+                return _reduce_matrix(queue, matrix, adjacency_list, found_isomorphisms, found_edges)
+
+            all_values = set()
+            for isomorphism in isomorphism_info:
+                iso_ids, adjacencies = isomorphism
+                for value in iso_ids:
+                    all_values.add(value)
+            max_val = max(all_values)
+            min_val = min(all_values)
+            # create a matrix to find atom overlaps
+            matrix_data = []
+            adjacency_list = []
+            for isomorphism in isomorphism_info:
+                iso_ids, adjacencies = isomorphism
+                row = []
+                for i in range(0, max_val+1):
+                    if i in iso_ids:
+                        row.append(1)
+                    else:
+                        row.append(0)
+                matrix_data.append(row)
+                adjacencies_tupled = [] # adjacencies in tuple form for easier searching
+                for bond, bond_type in adjacencies.items():
+                    edge_atom, cap_atom = bond
+                    adjacencies_tupled.append(tuple([edge_atom, cap_atom, bond_type]))
+                adjacency_list.append(adjacencies_tupled)
+
+            # matrix_data and adjacency_list are parallel to eachother
+            # each item in adjacency_list corresponds to the isomorphism found in the 
+            # corresponding row of matrix_data
+            matrix = np.matrix(matrix_data)
+            full_matrix = deepcopy(matrix)
+            n_rows, n_cols = matrix.shape
+            # first, find unique rows to start the recursive algorithm
+            # we only want one unique_col for each unique_row_ids
+            largest_mapping_group = []
+            largest_group_length = 0
+            for unique_row in range(0, n_rows):
+                if unique_row in largest_mapping_group:
+                    continue
+                row = np.squeeze(np.asarray(matrix[unique_row, :]))
+                search_scope, = np.where(row==1)
+                list_groups = _reduce_matrix([unique_row], full_matrix, adjacency_list, found_isomorphisms = [], found_edges = [], favor_isomorphisms=largest_mapping_group)
+                if list_groups: # if list group found
+                    
+                    # get the largest list group with the fewest number of rows
+                    group_length = full_matrix[list_groups, :].sum()
+                    matrix[list_groups, :] = np.zeros((len(list_groups), n_cols))
+                    if (group_length > largest_group_length) or (group_length == largest_group_length and len(list_groups) < len(largest_mapping_group)):
+                        largest_group_length = group_length
+                        largest_mapping_group = list_groups
+                else:
+                    continue
+            # finally pick from unique_mapping_groups the largest list
+            return largest_mapping_group
+               
+       
+        #MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM
+        #                 END OF HELPER FUNCTIONS
+        #WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW
+
+        # (1) create substructures and find isomorphisms for each
+        # (2) find which isomorphisms to use and check for full coverage
+        # (3) for each isomorphism, assign chemical information similar to 
+        #       existing implementation and copy code from there 
+
+        with open(monomer_info_json, "r") as subfile:
+            monomer_info_dict = json.load(subfile)
+
+        # arrange monomers in substructures by enumerating combinations of caps 
+        # and inter-monomer bonds
+        substructure_smarts = []
+        monomers = monomer_info_dict["monomers"]
+        caps = monomer_info_dict["caps"]
+
+        substructure_isomorphism_info = []
+        substructure_isomorphism_names = []
+        substructure_isomorphisms = []
+        substructure_rdmols = {}
+        for name, monomer_smarts in monomers.items():
+            if "ARG" in name:
+                test = 1
+            rdmol = Chem.MolFromSmarts(monomer_smarts)
+            monomer_caps = caps.get(name, []) # list 
+            cap_groups = []
+            # the default "cap" is the intermonomer bond represented with wildtype atoms
+            for atom in rdmol.GetAtoms():
+                if atom.GetAtomicNum() == 0:
+                    atom_id = atom.GetIdx()
+                    rdmol_copy = deepcopy(rdmol)
+                    atom_copy = rdmol_copy.GetAtomWithIdx(atom_id)
+                    # should only have one neighbor
+                    next_monomer_connection = None
+                    for neighbor in atom_copy.GetNeighbors():
+                        if neighbor.GetAtomMapNum() > 0: # if connected to intermonomer bond
+                            next_monomer_connection = neighbor
+                    next_monomer_connection.SetAtomicNum(0)
+                    atom_map_num = next_monomer_connection.GetAtomMapNum()
+                    next_monomer_connection.SetQuery(Chem.AtomFromSmarts("[*]"))
+                    next_monomer_connection.SetAtomMapNum(atom_map_num)
+                    ids_to_include = [atom.GetIdx(), next_monomer_connection.GetIdx()]
+                    cap_smarts = Chem.MolFragmentToSmarts(rdmol_copy, atomsToUse = ids_to_include)
+                    cap_groups.append(tuple([atom_map_num, [cap_smarts]]))
+            # also add end-of-polymer caps that are specified
+            for cap_smarts in monomer_caps:
+                cap_rdmol = Chem.MolFromSmarts(cap_smarts)
+                # find with atom on the monomer the cap bonds to
+                for atom in cap_rdmol.GetAtoms():
+                    if atom.GetAtomicNum() == 0:
+                        for map_num, cap_smarts_list in cap_groups:
+                            if atom.GetAtomMapNum() == map_num:
+                                cap_smarts_list.append(cap_smarts)
+                        break
+            # enumerate all combinations of the cap_groups
+            cap_groups = [set(l) for map_num, l in cap_groups]
+            deduplified_groups = []
+            [deduplified_groups.append(i) for i in cap_groups if i not in deduplified_groups]
+            deduplified_groups = [list(i) for i in deduplified_groups]
+            name_id = 0
+            for iters in itertools.product(*cap_groups): # enumerate all combinations of cap_groups
+                name_id += 1
+                if name_id != 1:
+                    cap_group_name = name + "_CAP" + str(name_id)
+                else:
+                    cap_group_name = name
+                # first, remove all wildtype atoms
+                nonwildtype_atoms = []
+                for atom in rdmol.GetAtoms():
+                    if atom.GetAtomicNum() > 0:
+                        nonwildtype_atoms.append(atom.GetIdx())
+                substructure_smarts = Chem.MolFragmentToSmarts(rdmol, atomsToUse = nonwildtype_atoms)
+                substructure = Chem.MolFromSmarts(substructure_smarts)
+                # attach caps to the substructure (except for intermonomder bonds, which are already present)
+                for cap_smarts in iters:
+                    #TODO: better way of doing this
+                    # attach the cap smarts to the substructure
+                    cap_rdmol = Chem.MolFromSmarts(cap_smarts)
+                    # remove attachment point
+                    attachment_atom_map_num = -1
+                    cap_start_id = -1
+                    cap_ids_to_include = []
+                    inter_monomer_bond_order = None
+                    for atom in cap_rdmol.GetAtoms():
+                        if atom.GetAtomicNum() == 0 and atom.GetAtomMapNum() > 0:
+                            attachment_atom_map_num = atom.GetAtomMapNum()
+                            # should have only one neighbor
+                            neighbor = atom.GetNeighbors()[0]
+                            cap_start_id = neighbor.GetIdx()
+                            bond = cap_rdmol.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
+                            inter_monomer_bond_order = bond.GetBondType()
+                        else:
+                            cap_ids_to_include.append(atom.GetIdx())
+                    # use atom MapNums to identify attachment points
+                    for atom in cap_rdmol.GetAtoms():
+                        if atom.GetIdx() == cap_start_id:
+                            atom.SetAtomMapNum(1)
+                        else:
+                            atom.SetAtomMapNum(0)
+                    cap_fragment = Chem.MolFragmentToSmarts(cap_rdmol, atomsToUse=cap_ids_to_include)
+                    cap_rdmol = Chem.MolFromSmarts(cap_fragment)
+                    for atom in cap_rdmol.GetAtoms():
+                        atom.SetAtomMapNum(-atom.GetAtomMapNum())
+                    # find where to attach the cap_fragment using atom map num
+                    new_substructure = Chem.CombineMols(substructure, cap_rdmol)
+                    # find start and end ids for the bond
+                    start = -1
+                    end = -1
+                    for atom in new_substructure.GetAtoms():
+                        if atom.GetAtomMapNum() < 0:
+                            start = atom.GetIdx()
+                        elif atom.GetAtomMapNum() == attachment_atom_map_num:
+                            end = atom.GetIdx()
+                    editable_mol = Chem.EditableMol(new_substructure)
+                    editable_mol.AddBond(start, end, order = inter_monomer_bond_order)
+                    substructure = editable_mol.GetMol()
+                # with a fully build substructure, search for isomorphisms 
+                substructure_rdmols[cap_group_name] = substructure
+                is_isomorphic, isomorphisms = _get_isomorphisms(substructure, omm_topology_G)
+                # for convenience, find with ids correspond to inter-monomer-bonds
+                inter_monomer_bonds = {}
+                for bond in substructure.GetBonds():
+                    if bond.GetBeginAtom().GetAtomicNum() == 0:
+                        inter_monomer_bonds[tuple([bond.GetEndAtomIdx(), bond.GetBeginAtomIdx()])] = bond.GetBondType()
+                    elif bond.GetEndAtom().GetAtomicNum() == 0:
+                        inter_monomer_bonds[tuple([bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()])] = bond.GetBondType()
+                if is_isomorphic:
+                    # build the isomorphisms information to use in `find_fitting_lists`
+                    isomorphisms = list(isomorphisms)
+                    iso_keys = [set(d.keys()) for d in isomorphisms]
+                    deduplified_iso_ids = dict()
+                    # [deduplified_iso_ids.update({id: l}) for id, l in zip(range(0,len(isomorphisms)), iso_keys) if l not in deduplified_iso_ids.values()]
+                    [deduplified_iso_ids.update({id: l}) for id, l in zip(range(0,len(isomorphisms)), iso_keys)]
+                    # for each, get the isomorphism keys and inter-monomer-bond info (all bonds with wildtype atoms)
+                    # zip together isomorhpism keys and bond info
+                    deduplified_isos = [isomorphisms[i] for i in deduplified_iso_ids.keys()]
+                    inter_monomer_bond_mapping = []
+                    isomorphism_map_ids = []
+                    for iso in deduplified_isos:
+                        # get inter_monomer_bond info
+                        inv_map = {a: b for b, a in iso.items()}
+                        bond_dict = {}
+                        wildtypes = set()
+                        for bond, bond_type in inter_monomer_bonds.items():
+                            bond_start, bond_end = bond
+                            map_start = inv_map[bond_start]
+                            map_end = inv_map[bond_end]
+                            wildtypes.add(map_end)
+                            bond_dict[tuple([map_start, map_end])] = bond_type #order is important!
+                        inter_monomer_bond_mapping.append(bond_dict)
+
+                        ids = set(iso.keys())
+                        isomorphism_map_ids.append(list(ids - wildtypes))
+                    isomorphism_info = list(zip(isomorphism_map_ids, inter_monomer_bond_mapping))
+                    substructure_isomorphisms += deduplified_isos
+                    substructure_isomorphism_info += isomorphism_info
+                    substructure_isomorphism_names += [cap_group_name] * len(isomorphism_info)#  TODO: better way to do this
+                else:
+                    continue
+        assert len(substructure_isomorphisms) == len(substructure_isomorphism_info) == len(substructure_isomorphism_names)
+        # at this point, should have lists of isomorphisms and what rdmols/substructures each corresponds to
+        # now, sort the isomorphisms using _find_fitting_lists
+        print("start")
+        if len(substructure_isomorphism_info) > 0:
+            fitted_isomorphism_ids = _find_fitting_lists(substructure_isomorphism_info)
+        else:
+            fitted_isomorphism_ids = []
+        print("end")
+        _bondtypes = {
+                # 0: Chem.BondType.AROMATIC,
+                Chem.BondType.SINGLE: 1,
+                Chem.BondType.AROMATIC: 1.5,
+                Chem.BondType.DOUBLE: 2,
+                Chem.BondType.TRIPLE: 3,
+                Chem.BondType.QUADRUPLE: 4,
+                Chem.BondType.QUINTUPLE: 5,
+                Chem.BondType.HEXTUPLE: 6,
+            }
+        isomorphism_summary = []
+        for iso_id, omm_idx_2_rdk_idx, isomorphism_name in zip(range(0,len(substructure_isomorphisms)), substructure_isomorphisms, substructure_isomorphism_names):
+            iso_rdmol = substructure_rdmols[isomorphism_name]
+            rdmol_G = _rdmol_to_networkx(iso_rdmol)
+            nonzero_omm_ids = []
+            for omm_idx, rdk_idx in omm_idx_2_rdk_idx.items():
+                if rdmol_G.nodes[rdk_idx]["atomic_number"] != 0:
+                    nonzero_omm_ids.append(omm_idx)
+            iso_selected = False
+            if iso_id in fitted_isomorphism_ids:
+                iso_selected = True
+                # for each, attempt to fill out the networkx representation of the the pdb
+                for omm_idx, rdk_idx in omm_idx_2_rdk_idx.items():
+                    if rdmol_G.nodes[rdk_idx]["atomic_number"] == 0:
+                        continue
+                    omm_topology_G.nodes[omm_idx][
+                        "formal_charge"
+                    ] = rdmol_G.nodes[rdk_idx]["formal_charge"]
+                    omm_topology_G.nodes[omm_idx]["already_matched"] = True
+                    omm_topology_G.nodes[omm_idx]["residue_name"] = isomorphism_name
+                rdk_idx_2_omm_idx = dict(
+                    [(j, i) for i, j in omm_idx_2_rdk_idx.items()]
+                )
+                for edge in rdmol_G.edges:
+                    if rdmol_G.nodes[edge[0]]["atomic_number"] == 0 or rdmol_G.nodes[edge[1]]["atomic_number"] == 0:
+                        continue
+                    omm_edge_idx = (
+                        rdk_idx_2_omm_idx[edge[0]],
+                        rdk_idx_2_omm_idx[edge[1]],
+                    )
+                    omm_topology_G.get_edge_data(*omm_edge_idx)[
+                        "bond_order"
+                    ] = rdmol_G.get_edge_data(*edge)["bond_order"]
+                iso_ids, bond_info = substructure_isomorphism_info[iso_id]
+                for omm_edge_idx, bond_type in bond_info.items():
+                    omm_topology_G.get_edge_data(*omm_edge_idx)[
+                        "bond_order"
+                    ] = _bondtypes[bond_type]
+            isomorphism_summary.append(tuple([isomorphism_name, nonzero_omm_ids, iso_selected]))
+                
+        # now with a fully formed omm_topology_G, transfer all info to an offmol
+        for node in omm_topology_G.nodes():
+            if omm_topology_G.nodes[node]["atomic_number"] < 0:
+                omm_topology_G.nodes[node]["atomic_number"] = 1   
+
+        offmol = Molecule()
+        conformer = []
+        for node_idx, node_data in omm_topology_G.nodes.items():
+            print(node_idx, node_data)
+            formal_charge = int(node_data["formal_charge"])
+            print(f"Formal charge: {formal_charge}")
+            if "already_matched" in node_data.keys():
+                custom_metadata = {
+                    "residue_name": node_data["residue_name"],
+                    "residue_number": node_data["residue_number"],
+                    "atom_name": node_data["atom_name"],
+                    "already_matched": True
+                }
+            else:
+                custom_metadata = {
+                    "residue_name": node_data["residue_name"],
+                    "residue_number": node_data["residue_number"],
+                    "atom_name": node_data["atom_name"],
+                    "already_matched": False
+                }
+
+            offmol.add_atom(
+                node_data["atomic_number"],
+                int(node_data["formal_charge"]),
+                False,
+                metadata=custom_metadata,
+            )
+            pos = node_data["pos"]
+            conformer.append(pos)
+
+        for edge, edge_data in omm_topology_G.edges.items():
+            print(edge, edge_data)
+            offmol.add_bond(edge[0], edge[1], edge_data["bond_order"], False)
+
+        offmol._conformers = [Quantity(conformer, 'angstrom')]
+
+        # Retrieve metadata to be recovered after roundtrip to rdkit land
+        atoms_metadata = [atom.metadata for atom in offmol.atoms]
+
+
+        # TODO: fill in the rest...
+        return offmol, isomorphism_summary
+
+    @classmethod
+    @requires_package("openmm")
     def from_polymer_pdb(
         cls,
         file_path: Union[str, TextIO],
