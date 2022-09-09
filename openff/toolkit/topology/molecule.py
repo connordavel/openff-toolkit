@@ -25,6 +25,7 @@ Molecular chemical entity representation and routines to interface with cheminfo
 
 """
 import json
+from multiprocessing.sharedctypes import Value
 import operator
 import pathlib
 import warnings
@@ -4198,6 +4199,8 @@ class FrozenMolecule(Serializable):
                     ] = rdmol_G.nodes[rdk_idx]["formal_charge"]
                     omm_topology_G.nodes[omm_idx]["already_matched"] = True
                     omm_topology_G.nodes[omm_idx]["residue_name"] = isomorphism_name
+                    omm_topology_G.nodes[omm_idx]["substructure_id"] = rdk_idx
+
                 rdk_idx_2_omm_idx = dict(
                     [(j, i) for i, j in omm_idx_2_rdk_idx.items()]
                 )
@@ -4229,20 +4232,16 @@ class FrozenMolecule(Serializable):
             print(node_idx, node_data)
             formal_charge = int(node_data["formal_charge"])
             print(f"Formal charge: {formal_charge}")
-            if "already_matched" in node_data.keys():
-                custom_metadata = {
-                    "residue_name": node_data["residue_name"],
-                    "residue_number": node_data["residue_number"],
-                    "atom_name": node_data["atom_name"],
-                    "already_matched": True
-                }
+
+            custom_metadata = {
+                key : value
+                    for key, value in node_data.items()
+                        if isinstance(value, (str, int)) # avoids error caused by restrictive type checking
+            }
+            if 'already_matched' in node_data.keys():
+                custom_metadata['already_matched'] = True
             else:
-                custom_metadata = {
-                    "residue_name": node_data["residue_name"],
-                    "residue_number": node_data["residue_number"],
-                    "atom_name": node_data["atom_name"],
-                    "already_matched": False
-                }
+                custom_metadata['already_matched'] = False
 
             offmol.add_atom(
                 node_data["atomic_number"],

@@ -1396,6 +1396,7 @@ class Topology(Serializable):
         for atom in top.atoms:
             if not atom.metadata['already_matched']:
                 error = True
+                
         if strict and error:
             return False, False, False
         else:
