@@ -4180,6 +4180,7 @@ class FrozenMolecule(Serializable):
                 Chem.BondType.HEXTUPLE: 6,
             }
         isomorphism_summary = []
+        residue_number_counter = 0
         for iso_id, omm_idx_2_rdk_idx, isomorphism_name in zip(range(0,len(substructure_isomorphisms)), substructure_isomorphisms, substructure_isomorphism_names):
             iso_rdmol = substructure_rdmols[isomorphism_name]
             rdmol_G = _rdmol_to_networkx(iso_rdmol)
@@ -4190,6 +4191,7 @@ class FrozenMolecule(Serializable):
             iso_selected = False
             if iso_id in fitted_isomorphism_ids:
                 iso_selected = True
+                residue_number_counter += 1
                 # for each, attempt to fill out the networkx representation of the the pdb
                 for omm_idx, rdk_idx in omm_idx_2_rdk_idx.items():
                     if rdmol_G.nodes[rdk_idx]["atomic_number"] == 0:
@@ -4200,10 +4202,9 @@ class FrozenMolecule(Serializable):
                     omm_topology_G.nodes[omm_idx]["already_matched"] = True
                     omm_topology_G.nodes[omm_idx]["residue_name"] = isomorphism_name
                     omm_topology_G.nodes[omm_idx]["substructure_id"] = rdk_idx
+                    omm_topology_G.nodes[omm_idx]["residue_number"] = residue_number_counter
 
-                rdk_idx_2_omm_idx = dict(
-                    [(j, i) for i, j in omm_idx_2_rdk_idx.items()]
-                )
+                rdk_idx_2_omm_idx = {j : i for i, j in omm_idx_2_rdk_idx.items()}
                 for edge in rdmol_G.edges:
                     if rdmol_G.nodes[edge[0]]["atomic_number"] == 0 or rdmol_G.nodes[edge[1]]["atomic_number"] == 0:
                         continue
