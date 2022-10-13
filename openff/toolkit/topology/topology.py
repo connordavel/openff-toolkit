@@ -1290,7 +1290,7 @@ class Topology(Serializable):
 
     @classmethod
     @requires_package("openmm")
-    def from_pdb_and_monomer_info(cls, file_path, monomer_info_json = "", strict = True):
+    def from_pdb_and_monomer_info(cls, file_path, monomer_info_json = "", strict = True, verbose = False):
         import networkx as nx
         from openmm.app import PDBFile
         from rdkit import Chem
@@ -1384,7 +1384,7 @@ class Topology(Serializable):
             mapping = dict(zip(subgraph.nodes, range(0, len(subgraph.nodes))))
             subgraph_reindexed = nx.relabel_nodes(subgraph, mapping)
             reverse_mapping = dict([(j,i) for i,j in mapping.items()])
-            offmol, substructure_summary = Molecule().from_omm_topology_G(subgraph_reindexed, monomer_info_json)
+            offmol, substructure_summary = Molecule().from_omm_topology_G(subgraph_reindexed, monomer_info_json, verbose=verbose)
             substructure_summary = [tuple([name, [reverse_mapping[i] for i in ids], mapped]) for name, ids, mapped in substructure_summary]
             topology_substructures += substructure_summary
             molecules.append(offmol)
