@@ -4062,14 +4062,13 @@ class FrozenMolecule(Serializable):
         substructure_smarts = []
         monomers = monomer_info_dict["monomers"]
         caps = monomer_info_dict["caps"]
+        charges = monomer_info_dict.get("charges", dict())
 
         substructure_isomorphism_info = []
         substructure_isomorphism_names = []
         substructure_isomorphisms = []
         substructure_rdmols = {}
         for name, monomer_smarts in monomers.items():
-            if "ARG" in name:
-                test = 1
             rdmol = Chem.MolFromSmarts(monomer_smarts)
             monomer_caps = caps.get(name, []) # list 
             cap_groups = []
@@ -4164,6 +4163,7 @@ class FrozenMolecule(Serializable):
                     editable_mol.AddBond(start, end, order = inter_monomer_bond_order)
                     substructure = editable_mol.GetMol()
                 # with a fully build substructure, search for isomorphisms 
+                # if charges are given, add them here
                 substructure_rdmols[cap_group_name] = substructure
                 is_isomorphic, isomorphisms = _get_isomorphisms(substructure, omm_topology_G)
                 # for convenience, find with ids correspond to inter-monomer-bonds
@@ -4226,6 +4226,7 @@ class FrozenMolecule(Serializable):
         isomorphism_summary = []
         residue_number_counter = 0
         for iso_id, omm_idx_2_rdk_idx, isomorphism_name in zip(range(0,len(substructure_isomorphisms)), substructure_isomorphisms, substructure_isomorphism_names):
+            iso_charges = charges.get(isomorphism_name, {})
             iso_rdmol = substructure_rdmols[isomorphism_name]
             rdmol_G = _rdmol_to_networkx(iso_rdmol)
             nonzero_omm_ids = []
@@ -4247,6 +4248,8 @@ class FrozenMolecule(Serializable):
                     omm_topology_G.nodes[omm_idx]["residue_name"] = isomorphism_name
                     omm_topology_G.nodes[omm_idx]["substructure_id"] = rdk_idx
                     omm_topology_G.nodes[omm_idx]["residue_number"] = residue_number_counter
+                    if charges:
+                        omm_topology_G.nodes[omm_idx]["partial_charge"] = iso_charges.get(str(rdmol_G.nodes[rdk_idx]["map_num"]), 0)
 
                 rdk_idx_2_omm_idx = {j : i for i, j in omm_idx_2_rdk_idx.items()}
                 for edge in rdmol_G.edges:
@@ -4273,6 +4276,7 @@ class FrozenMolecule(Serializable):
 
         offmol = Molecule()
         conformer = []
+        
         for node_idx, node_data in omm_topology_G.nodes.items():
             formal_charge = int(node_data["formal_charge"])
             if verbose:
@@ -4308,6 +4312,11 @@ class FrozenMolecule(Serializable):
         # Retrieve metadata to be recovered after roundtrip to rdkit land
         atoms_metadata = [atom.metadata for atom in offmol.atoms]
 
+        if charges:
+            charges_array = np.array([0] * offmol.n_atoms, dtype=np.float32)
+            for node_idx, node_data in omm_topology_G.nodes.items():
+                charges_array[node_idx] = node_data["partial_charge"]
+            offmol._partial_charges = unit.Quantity(charges_array, unit.elementary_charge)
 
         # TODO: fill in the rest...
         return offmol, isomorphism_summary
