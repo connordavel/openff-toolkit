@@ -4246,7 +4246,7 @@ class FrozenMolecule(Serializable):
                     ] = rdmol_G.nodes[rdk_idx]["formal_charge"]
                     omm_topology_G.nodes[omm_idx]["already_matched"] = True
                     omm_topology_G.nodes[omm_idx]["residue_name"] = isomorphism_name
-                    omm_topology_G.nodes[omm_idx]["substructure_id"] = rdk_idx
+                    omm_topology_G.nodes[omm_idx]["substructure_id"] = iso_rdmol.GetAtomWithIdx(rdk_idx).GetAtomMapNum()
                     omm_topology_G.nodes[omm_idx]["residue_number"] = residue_number_counter
                     if charges:
                         omm_topology_G.nodes[omm_idx]["partial_charge"] = iso_charges.get(str(rdmol_G.nodes[rdk_idx]["map_num"]), 0)
