@@ -75,10 +75,17 @@ def _topology_deprecation(old_method, new_method):
 
 class UnmatchedAtomsError(Exception):
     """Raised when complete atomic coverage during graph residue matching has not occurred"""
-    def __init__(self, msg='One of more atoms in residue could not be matched to monomer structure data', *args, **kwargs):
+
+    def __init__(
+        self,
+        msg="One of more atoms in residue could not be matched to monomer structure data",
+        *args,
+        **kwargs,
+    ):
         super().__init__(msg, *args, **kwargs)
 
-SubstructSummary = Tuple[str, List[int], bool] # type alias to make typehinting clearer
+
+SubstructSummary = Tuple[str, List[int], bool]  # type alias to make typehinting clearer
 
 
 class TopologyDeprecationWarning(UserWarning):
@@ -1298,7 +1305,15 @@ class Topology(Serializable):
 
     @classmethod
     @requires_package("openmm")
-    def from_pdb_and_monomer_info(cls, file_path : str, monomer_info_json : str="", strict : bool=True, verbose : bool=False) -> Tuple['openff.toolkit.topology.topology.Topology', List[SubstructSummary], bool]:
+    def from_pdb_and_monomer_info(
+        cls,
+        file_path: str,
+        monomer_info_json: str = "",
+        strict: bool = True,
+        verbose: bool = False,
+    ) -> Tuple[
+        "openff.toolkit.topology.topology.Topology", List[SubstructSummary], bool
+    ]:
         import networkx as nx
         from openmm.app import PDBFile
         from rdkit import Chem
@@ -1337,13 +1352,13 @@ class Topology(Serializable):
                 vec = position._value
                 omm_topology_G.add_node(
                     atom.index,
-                    pos = list(vec),
-                    pdb_atom_id = atom.index, # this remains constant throughout any index reordering
-                    atomic_number = atom.element.atomic_number,
-                    formal_charge = 0.0,
-                    atom_name = atom.name,
-                    residue_name = atom.residue.name,
-                    residue_number = atom.residue.index
+                    pos=list(vec),
+                    pdb_atom_id=atom.index,  # this remains constant throughout any index reordering
+                    atomic_number=atom.element.atomic_number,
+                    formal_charge=0.0,
+                    atom_name=atom.name,
+                    residue_name=atom.residue.name,
+                    residue_number=atom.residue.index,
                 )
 
             n_hydrogens = [0] * openmm_topology.getNumAtoms()
@@ -1389,12 +1404,19 @@ class Topology(Serializable):
         for chain in nx.connected_components(omm_topology_G):
             subgraph = omm_topology_G.subgraph(chain)
             # relabel the subgraph
-            mapping = {node : i for (i, node) in enumerate(subgraph.nodes)} # easier to parse syntactically
-            reverse_mapping = {i : node for (node, i) in mapping.items()}
+            mapping = {
+                node: i for (i, node) in enumerate(subgraph.nodes)
+            }  # easier to parse syntactically
+            reverse_mapping = {i: node for (node, i) in mapping.items()}
             subgraph_reindexed = nx.relabel_nodes(subgraph, mapping)
-            
-            offmol, substructure_summary = Molecule().from_omm_topology_G(subgraph_reindexed, monomer_info_json, verbose=verbose)
-            substructure_summary = [tuple([name, [reverse_mapping[i] for i in ids], mapped]) for name, ids, mapped in substructure_summary]
+
+            offmol, substructure_summary = Molecule().from_omm_topology_G(
+                subgraph_reindexed, monomer_info_json, verbose=verbose
+            )
+            substructure_summary = [
+                tuple([name, [reverse_mapping[i] for i in ids], mapped])
+                for name, ids, mapped in substructure_summary
+            ]
             topology_substructures += substructure_summary
             molecules.append(offmol)
 
@@ -1402,10 +1424,16 @@ class Topology(Serializable):
 
         # final check
         for atom in top.atoms:
-            if strict and not atom.metadata['already_matched']: # don't need error flag, as result is same as stopping at first unmatched atom
-                raise UnmatchedAtomsError # raise exception instead of returning bools, clearer to user and consistent with output typing
-                
-        return top, topology_substructures, True # implicit if atom match check hasn't failed (don't need if statement)
+            if (
+                strict and not atom.metadata["already_matched"]
+            ):  # don't need error flag, as result is same as stopping at first unmatched atom
+                raise UnmatchedAtomsError  # raise exception instead of returning bools, clearer to user and consistent with output typing
+
+        return (
+            top,
+            topology_substructures,
+            True,
+        )  # implicit if atom match check hasn't failed (don't need if statement)
 
     @classmethod
     @requires_package("openmm")
