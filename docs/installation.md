@@ -106,11 +106,11 @@ Note that this may update other packages or install new packages if the most rec
 
 ## Installing from source
 
-The OpenFF Toolkit has a lot of dependencies, so we strongly encourage installation with a package manager. The [developer's guide](install_dev) describes setting up a development environment. If you're sure you want to install from source, check the [`conda-forge` recipe](https://github.com/conda-forge/openff-toolkit-feedstock/blob/main/recipe/meta.yaml) for current dependencies, install them, download and extract the source distribution from [GitHub](https://github.com/openforcefield/openff-toolkit/releases), and then run `setup.py`:
+The OpenFF Toolkit has a lot of dependencies, so we strongly encourage installation with a package manager. The [developer's guide](install_dev) describes setting up a development environment. If you're sure you want to install from source, check the [`conda-forge` recipe](https://github.com/conda-forge/openff-toolkit-feedstock/blob/main/recipe/meta.yaml) for current dependencies, install them, download and extract the source distribution from [GitHub](https://github.com/openforcefield/openff-toolkit/releases), and then run `pip`:
 
 ```shell-session
 $ cd openff-toolkit
-$ python setup.py install
+$ python -m pip install .
 ```
 
 ## Single-file installer
@@ -198,3 +198,14 @@ $ conda install -c openeye -c conda-forge openeye-toolkits
 
 Though OpenEye can be installed for free, using it requires a license file. 
 No essential `openff-toolkit` release capabilities *require* the OpenEye toolkit, but the Open Force Field developers make use of it in parameterizing new open source force fields.
+
+
+### Check installed toolkits
+
+All available toolkits are automatically registered in the `GLOBAL_TOOLKIT_REGISTRY`. The available toolkits and their versions can be inspected through the `registered_toolkit_versions` dictionary:
+
+```python
+from openff.toolkit import GLOBAL_TOOLKIT_REGISTRY
+print(GLOBAL_TOOLKIT_REGISTRY.registered_toolkit_versions)
+# {'The RDKit': '2022.03.5', 'AmberTools': '22.0', 'Built-in Toolkit': None}
+```

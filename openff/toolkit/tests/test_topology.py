@@ -10,6 +10,7 @@ from copy import deepcopy
 import numpy as np
 import pytest
 from openff.units import unit
+from openff.units.openmm import from_openmm
 from openff.units.units import Quantity
 from openmm import app
 
@@ -202,6 +203,16 @@ class TestTopology:
         ]:
             topology.box_vectors = good_vectors
             assert (topology.box_vectors == good_vectors * np.eye(3)).all()
+
+    def test_issue_1527(self):
+        """Test the error handling of setting box vectors with an OpenMM quantity."""
+        import numpy
+        import openmm.unit
+
+        topology = Topology()
+        topology.box_vectors = numpy.ones(3) * openmm.unit.nanometer
+
+        assert isinstance(topology.box_vectors, unit.Quantity)
 
     def test_is_periodic(self):
         """Test the getter and setter for is_periodic"""
@@ -511,9 +522,20 @@ class TestTopology:
 
         molecules = [create_ethanol(), create_cyclohexane()]
 
-        topology = Topology.from_openmm(pdbfile.topology, unique_molecules=molecules)
+        topology = Topology.from_openmm(
+            pdbfile.topology,
+            unique_molecules=molecules,
+            positions=pdbfile.positions,
+        )
         assert topology.n_molecules == 239
         assert topology.n_unique_molecules == 2
+        assert np.all(topology.get_positions() == from_openmm(pdbfile.positions))
+        # Ensure that hierarchy iterators are initialized
+        assert all(
+            all([molecule.residues, molecule.chains]) for molecule in topology.molecules
+        )
+        for omm_atom, off_atom in zip(pdbfile.topology.atoms(), topology.atoms):
+            assert omm_atom.name == off_atom.name
 
     def test_from_openmm_missing_reference(self):
         """Test creation of an OpenFF Topology object from an OpenMM Topology when missing a unique molecule"""
@@ -1459,8 +1481,8 @@ class TestTopology:
         chains = list(top.hierarchy_iterator("chains"))
         assert chains == []
         assert [res.identifier for res in residues] == [
-            ("None", 1, " ", "ACE"),
-            ("None", 2, " ", "ALA"),
+            ("None", "1", " ", "ACE"),
+            ("None", "2", " ", "ALA"),
         ]
         # Ensure that adding molecules WITH hierarchy perceived DOES give the
         # topology residues and chains to iterate over
@@ -1469,16 +1491,16 @@ class TestTopology:
         residues = list(top.hierarchy_iterator("residues"))
         chains = list(top.hierarchy_iterator("chains"))
         assert [res.identifier for res in residues] == [
-            ("None", 1, " ", "ACE"),
-            ("None", 2, " ", "ALA"),
-            ("None", 1, " ", "ACE"),
-            ("None", 2, " ", "ALA"),
-            ("None", 1, " ", "ACE"),
-            ("None", 2, " ", "CYS"),
-            ("None", 3, " ", "NME"),
-            ("None", 4, " ", "ACE"),
-            ("None", 5, " ", "CYS"),
-            ("None", 6, " ", "NME"),
+            ("None", "1", " ", "ACE"),
+            ("None", "2", " ", "ALA"),
+            ("None", "1", " ", "ACE"),
+            ("None", "2", " ", "ALA"),
+            ("None", "1", " ", "ACE"),
+            ("None", "2", " ", "CYS"),
+            ("None", "3", " ", "NME"),
+            ("None", "4", " ", "ACE"),
+            ("None", "5", " ", "CYS"),
+            ("None", "6", " ", "NME"),
         ]
         # First chain hierarchy element is from dipeptide_hierarchy_added,
         # second is from cyx_hierarchy_added. Both have the same uniqueness
@@ -1492,16 +1514,16 @@ class TestTopology:
         residues = list(top.hierarchy_iterator("residues"))
         chains = list(top.hierarchy_iterator("chains"))
         assert [res.identifier for res in residues] == [
-            ("None", 1, " ", "ACE"),
-            ("None", 2, " ", "ALA"),
-            ("None", 1, " ", "ACE"),
-            ("None", 2, " ", "ALA"),
-            ("None", 1, " ", "ACE"),
-            ("None", 2, " ", "CYS"),
-            ("None", 3, " ", "NME"),
-            ("None", 4, " ", "ACE"),
-            ("None", 5, " ", "CYS"),
-            ("None", 6, " ", "NME"),
+            ("None", "1", " ", "ACE"),
+            ("None", "2", " ", "ALA"),
+            ("None", "1", " ", "ACE"),
+            ("None", "2", " ", "ALA"),
+            ("None", "1", " ", "ACE"),
+            ("None", "2", " ", "CYS"),
+            ("None", "3", " ", "NME"),
+            ("None", "4", " ", "ACE"),
+            ("None", "5", " ", "CYS"),
+            ("None", "6", " ", "NME"),
         ]
         assert len(chains) == 2
 
@@ -1594,7 +1616,6 @@ class TestTopologySerialization:
     @pytest.mark.parametrize(("n_molecules"), [1, 2])
     @pytest.mark.parametrize(("format"), ["dict", "json"])
     def test_roundtrip(self, oleic_acid, with_conformers, n_molecules, format):
-
         if with_conformers:
             n_conformers = 2
             oleic_acid.generate_conformers(n_conformers=n_conformers)
@@ -1634,7 +1655,6 @@ def test_nth_degree_neighbors(n_degrees, num_pairs):
 
 
 def _tagsorted_dict_init_ref_key(tsd):
-
     if tsd is None:
         tsd = TagSortedDict()
 

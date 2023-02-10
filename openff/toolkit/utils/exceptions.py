@@ -85,6 +85,10 @@ class SMILESParseError(OpenFFToolkitException, ValueError):
     """The record could not be parsed into the given format"""
 
 
+class RadicalsNotSupportedError(OpenFFToolkitException):
+    """The OpenFF Toolkit does not currently support parsing molecules with radicals."""
+
+
 class InvalidConformerError(OpenFFToolkitException):
     """
     This error is raised when the conformer added to the molecule
@@ -108,6 +112,10 @@ class NotInTopologyError(OpenFFToolkitException):
     """An object was not found in a topology."""
 
 
+class RemapIndexError(OpenFFToolkitException):
+    """An error with indices used to remap a molecule"""
+
+
 class AtomNotInTopologyError(NotInTopologyError):
     """An atom was not found in a topology."""
 
@@ -129,6 +137,12 @@ class DuplicateUniqueMoleculeError(OpenFFToolkitException):
 class NotBondedError(OpenFFToolkitException):
     """
     Exception for when a function requires a bond between two atoms, but none is present
+    """
+
+
+class InvalidBondOrderError(OpenFFToolkitException):
+    """
+    Exception for passing a non-int to `Molecule.bond_order`
     """
 
 
@@ -157,6 +171,7 @@ class SMIRKSMismatchError(OpenFFToolkitException):
     """
 
 
+# TODO: This should be renamed to SMARTSParsingError
 class SMIRKSParsingError(OpenFFToolkitException):
     """
     Exception for when SMIRKS are not parseable for any environment
@@ -318,7 +333,7 @@ class UnassignedChemistryInPDBError(OpenFFToolkitException, ValueError):
     def __init__(
         self,
         msg: Optional[str] = None,
-        substructure_library: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        substructure_library: Optional[Dict[str, Tuple[str, List[str]]]] = None,
         omm_top: Optional["OpenMMTopology"] = None,
         unassigned_bonds: Optional[List[Tuple[int, int]]] = None,
         unassigned_atoms: Optional[List[int]] = None,
@@ -523,8 +538,6 @@ class UnassignedChemistryInPDBError(OpenFFToolkitException, ValueError):
     def mismatched_atom_names_hint(self) -> List[str]:
         from collections import defaultdict
 
-        from openff.toolkit import Molecule
-
         if not (self.omm_top and self.substructure_library):
             return []
 
@@ -546,9 +559,7 @@ class UnassignedChemistryInPDBError(OpenFFToolkitException, ValueError):
                 # Residue is not in substructure library at all!
                 atoms.clear()
                 continue
-            for smiles, names in library_res.items():
-                offmol = Molecule.from_smiles(smiles, allow_undefined_stereo=True)
-                library_elements = sorted(atom.symbol for atom in offmol.atoms)
+            for library_elements, names in library_res:
                 residue_elements = sorted(atom.element.symbol for atom in res.atoms())
                 if library_elements == residue_elements:
                     # Prune the atoms down to just those whose names don't match

@@ -56,17 +56,26 @@ import functools
 import inspect
 import logging
 import re
-from collections import OrderedDict, defaultdict
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from collections import defaultdict
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+    get_args,
+)
 
 import numpy as np
 from openff.units import unit
 from packaging.version import Version
-from typing_extensions import Literal, get_args
 
 from openff.toolkit.topology import ImproperDict, TagSortedDict, Topology, ValenceDict
 from openff.toolkit.topology.molecule import Molecule
-from openff.toolkit.typing.chemistry import ChemicalEnvironment
 from openff.toolkit.utils.collections import ValidatedDict, ValidatedList
 from openff.toolkit.utils.exceptions import (
     DuplicateParameterError,
@@ -87,11 +96,7 @@ from openff.toolkit.utils.exceptions import (
     UnassignedValenceParameterException,
 )
 from openff.toolkit.utils.toolkits import GLOBAL_TOOLKIT_REGISTRY
-from openff.toolkit.utils.utils import (
-    attach_units,
-    extract_serialized_units_from_dict,
-    object_to_quantity,
-)
+from openff.toolkit.utils.utils import object_to_quantity
 
 logger = logging.getLogger(__name__)
 
@@ -101,19 +106,20 @@ _cal_mol_a2 = unit.calorie / unit.mole / unit.angstrom**2
 
 def _linear_inter_or_extrapolate(points_dict, x_query):
     """
-    Linearly interpolate or extrapolate based on a piecewise linear function defined by a set of points.
-    This function is designed to work with key:value pairs where the value may be a openmm.unit.Quantity.
+    Linearly interpolate or extrapolate based on a piecewise linear function
+    defined by a set of points. This function is designed to work with
+    key:value pairs where the value may be a ``openff.units.Quantity``.
 
     Parameters
     ----------
-    points_dict : dict{float: float or float-valued openmm.unit.Quantity}
+    points_dict : dict{float: float or float-valued openff.units.Quantity}
         A dictionary with each item representing a point, where the key is the X value and the value is the Y value.
     x_query : float
         The X value of the point to interpolate or extrapolate.
 
     Returns
     -------
-    y_value : float or float-valued openmm.unit.Quantity
+    y_value : float or float-valued openff.units.Quantity
         The result of interpolation/extrapolation.
     """
 
@@ -186,7 +192,6 @@ def _allow_only(allowed_values):
 
         # Ensure that the new value is in the list of allowed values
         if new_value not in allowed_values:
-
             err_msg = (
                 f"Attempted to set {instance.__class__.__name__}.{attr.name} "
                 f"to {new_value}. Currently, only the following values "
@@ -233,7 +238,7 @@ class ParameterAttribute:
     default : object, optional
         When specified, the descriptor makes this attribute optional by
         attaching a default value to it.
-    unit : openmm.unit.Quantity, optional
+    unit : openff.units.Quantity, optional
         When specified, only quantities with compatible units are allowed
         to be set, and string expressions are automatically parsed into a
         ``Quantity``.
@@ -272,18 +277,19 @@ class ParameterAttribute:
 
     The attribute allow automatic conversion and validation of units.
 
-    >>> from openmm import unit
+    >>> from openff.units import unit
     >>> class MyParameter:
     ...     attr_quantity = ParameterAttribute(unit=unit.angstrom)
     ...
     >>> my_par = MyParameter()
     >>> my_par.attr_quantity = '1.0 * nanometer'
     >>> my_par.attr_quantity
-    Quantity(value=1.0, unit=nanometer)
+    <Quantity(1.0, 'nanometer')>
     >>> my_par.attr_quantity = 3.0
     Traceback (most recent call last):
     ...
-    openff.toolkit.utils.utils.IncompatibleUnitError: attr_quantity=3.0 dimensionless should have units of angstrom
+    openff.toolkit.utils.exceptions.IncompatibleUnitError:
+    attr_quantity=3.0 dimensionless should have units of angstrom
 
     You can attach a custom converter to an attribute.
 
@@ -329,7 +335,13 @@ class ParameterAttribute:
 
         pass
 
-    def __init__(self, default=UNDEFINED, unit=None, converter=None, docstring=""):
+    def __init__(
+        self,
+        default: Any = UNDEFINED,
+        unit: Optional[unit.Unit] = None,
+        converter: Optional[Callable] = None,
+        docstring: str = "",
+    ):
         self.default = default
         self._unit = unit
         self._converter = converter
@@ -437,7 +449,7 @@ class IndexedParameterAttribute(ParameterAttribute):
     default : object, optional
         When specified, the descriptor makes this attribute optional by
         attaching a default value to it.
-    unit : openmm.unit.Quantity, optional
+    unit : openff.units.Quantity, optional
         When specified, only sequences of quantities with compatible units
         are allowed to be set.
     converter : callable, optional
@@ -458,7 +470,7 @@ class IndexedParameterAttribute(ParameterAttribute):
 
     Create an optional indexed attribute with unit of angstrom.
 
-    >>> from openmm import unit
+    >>> from openff.units import unit
     >>> class MyParameter:
     ...     length = IndexedParameterAttribute(default=None, unit=unit.angstrom)
     ...
@@ -470,7 +482,7 @@ class IndexedParameterAttribute(ParameterAttribute):
 
     >>> my_par.length = ['1 * angstrom', 0.5 * unit.nanometer]
     >>> my_par.length[0]
-    Quantity(value=1, unit=angstrom)
+    <Quantity(1, 'angstrom')>
 
     Similarly, custom converters work as with ``ParameterAttribute``, but
     they are used to validate each value in the sequence.
@@ -514,7 +526,7 @@ class MappedParameterAttribute(ParameterAttribute):
     default : object, optional
         When specified, the descriptor makes this attribute optional by
         attaching a default value to it.
-    unit : openmm.unit.Quantity, optional
+    unit : openff.units.Quantity, optional
         When specified, only sequences of mappings where values are quantities with
         compatible units are allowed to be set.
     converter : callable, optional
@@ -533,7 +545,7 @@ class MappedParameterAttribute(ParameterAttribute):
 
     Create an optional indexed attribute with unit of angstrom.
 
-    >>> from openmm import unit
+    >>> from openff.units import unit
     >>> class MyParameter:
     ...     length = MappedParameterAttribute(default=None, unit=unit.angstrom)
     ...
@@ -545,7 +557,7 @@ class MappedParameterAttribute(ParameterAttribute):
 
     >>> my_par.length = {1:'1.5 * angstrom', 2: '1.4 * angstrom'}
     >>> my_par.length[1]
-    Quantity(value=1.5, unit=angstrom)
+    <Quantity(1.5, 'angstrom')>
 
     Unlike other ParameterAttribute objects, the reference points can do not need ot be
     zero-indexed, non-adjancent, such as interpolating defining a bond parameter for
@@ -553,7 +565,7 @@ class MappedParameterAttribute(ParameterAttribute):
 
     >>> my_par.length = {2:'1.42 * angstrom', 3: '1.35 * angstrom'}
     >>> my_par.length[2]
-    Quantity(value=1.42, unit=angstrom)
+    <Quantity(1.42, 'angstrom')>
 
     """
 
@@ -590,7 +602,7 @@ class IndexedMappedParameterAttribute(ParameterAttribute):
     default : object, optional
         When specified, the descriptor makes this attribute optional by
         attaching a default value to it.
-    unit : openmm.unit.Quantity, optional
+    unit : openff.units.Quantity, optional
         When specified, only sequences of mappings where values are quantities with
         compatible units are allowed to be set.
     converter : callable, optional
@@ -609,7 +621,7 @@ class IndexedMappedParameterAttribute(ParameterAttribute):
 
     Create an optional indexed attribute with unit of angstrom.
 
-    >>> from openmm import unit
+    >>> from openff.units import unit
     >>> class MyParameter:
     ...     length = IndexedMappedParameterAttribute(default=None, unit=unit.angstrom)
     ...
@@ -621,7 +633,7 @@ class IndexedMappedParameterAttribute(ParameterAttribute):
 
     >>> my_par.length = [{1:'1 * angstrom'}, {1: 0.5 * unit.nanometer}]
     >>> my_par.length[0]
-    {1: Quantity(value=1, unit=angstrom)}
+    {1: <Quantity(1, 'angstrom')>}
 
     Similarly, custom converters work as with ``ParameterAttribute``, but
     they are used to validate each value in the sequence.
@@ -710,14 +722,15 @@ class _ParameterAttributeHandler:
     These are automatically converted to ``Quantity`` objects.
 
     >>> my_par.length
-    Quantity(value=1.01, unit=angstrom)
+    <Quantity(1.01, 'angstrom')>
 
     While assigning incompatible units is forbidden.
 
     >>> my_par.k = 3.0 * unit.gram
     Traceback (most recent call last):
     ...
-    openff.toolkit.utils.utils.IncompatibleUnitError: k=3.0 g should have units of kilocalorie/(angstrom**2*mole)
+    openff.toolkit.utils.exceptions.IncompatibleUnitError:
+    k=3.0 gram should have units of kilocalorie / angstrom ** 2 / mole
 
     On top of type checking, the constructor implemented in ``_ParameterAttributeHandler``
     checks if some required parameters are not given.
@@ -725,8 +738,8 @@ class _ParameterAttributeHandler:
     >>> ParameterTypeOrHandler(length=3.0*unit.nanometer)
     Traceback (most recent call last):
     ...
-    openff.toolkit.typing.engines.smirnoff.parameters.SMIRNOFFSpecError:
-    <class 'openff.toolkit.typing.engines.smirnoff.parameters.ParameterTypeOrHandler'> require the following missing
+    openff.toolkit.utils.exceptions.SMIRNOFFSpecError:
+    <class '...ParameterTypeOrHandler'> require the following missing
     parameters: ['k']. Defined kwargs are ['length']
 
     Each attribute can be made optional by specifying a default value,
@@ -882,7 +895,6 @@ class _ParameterAttributeHandler:
                 and (index is not None)
                 and attr_name in self._get_indexed_mapped_parameter_attributes()
             ):
-
                 # we start with a dict because have no guarantee of order
                 # in which we will see each kwarg
                 # we'll switch this to a list later
@@ -1032,7 +1044,7 @@ class _ParameterAttributeHandler:
         indexed_mapped_attribs = set(
             self._get_indexed_mapped_parameter_attributes().keys()
         )
-        smirnoff_dict = OrderedDict()
+        smirnoff_dict = dict()
 
         # If attribs_to_return is ordered here, that will effectively be an informal output ordering
         for attrib_name in attribs_to_return:
@@ -1330,7 +1342,7 @@ class _ParameterAttributeHandler:
         # sorts the attribute alphabetically by name. Here we want the order
         # to be the same as the declaration order, which is guaranteed by PEP 520,
         # starting from the parent class.
-        parameter_attributes = OrderedDict(
+        parameter_attributes = dict(
             (name, descriptor)
             for c in reversed(inspect.getmro(cls))
             for name, descriptor in c.__dict__.items()
@@ -1380,7 +1392,7 @@ class _ParameterAttributeHandler:
         required = self._get_required_parameter_attributes()
         optional = self._get_optional_parameter_attributes()
         # Filter the optional parameters that are set to their default.
-        optional = OrderedDict(
+        optional = dict(
             (name, descriptor)
             for name, descriptor in optional.items()
             if not (
@@ -1611,12 +1623,11 @@ class ParameterType(_ParameterAttributeHandler):
     --------
 
     This class allows to define new parameter types by just listing its
-    attributes. In the example below, ``_VALENCE_TYPE`` AND ``_ELEMENT_NAME``
-    are used for the validation of the SMIRKS pattern associated to the
-    parameter and the automatic serialization/deserialization into a ``dict``.
+    attributes. In the example below, ``_ELEMENT_NAME`` is used to
+    describe the SMIRNOFF parameter being defined, and is used during
+    automatic serialization/deserialization into a ``dict``.
 
     >>> class MyBondParameter(ParameterType):
-    ...     _VALENCE_TYPE = 'Bond'
     ...     _ELEMENT_NAME = 'Bond'
     ...     length = ParameterAttribute(unit=unit.angstrom)
     ...     k = ParameterAttribute(unit=unit.kilocalorie / unit.mole / unit.angstrom**2)
@@ -1633,18 +1644,18 @@ class ParameterType(_ParameterAttributeHandler):
     ...     k=5 * unit.kilocalorie / unit.mole / unit.angstrom**2
     ... )
     >>> my_par.length
-    Quantity(value=1.01, unit=angstrom)
+    <Quantity(1.01, 'angstrom')>
     >>> my_par.k = 3.0 * unit.gram
     Traceback (most recent call last):
     ...
-    openff.toolkit.utils.utils.IncompatibleUnitError: k=3.0 g should have units of kilocalorie/(angstrom**2*mole)
+    openff.toolkit.utils.exceptions.IncompatibleUnitError:
+    k=3.0 gram should have units of kilocalorie / angstrom ** 2 / mole
 
     Each attribute can be made optional by specifying a default value,
     and you can attach a converter function by passing a callable as an
     argument or through the decorator syntax.
 
     >>> class MyParameterType(ParameterType):
-    ...     _VALENCE_TYPE = 'Atom'
     ...     _ELEMENT_NAME = 'Atom'
     ...
     ...     attr_optional = ParameterAttribute(default=2)
@@ -1684,7 +1695,6 @@ class ParameterType(_ParameterAttributeHandler):
     is performed for each indexed attribute.
 
     >>> class MyTorsionType(ParameterType):
-    ...     _VALENCE_TYPE = 'ProperTorsion'
     ...     _ELEMENT_NAME = 'Proper'
     ...     periodicity = IndexedParameterAttribute(converter=int)
     ...     k = IndexedParameterAttribute(unit=unit.kilocalorie / unit.mole)
@@ -1709,8 +1719,6 @@ class ParameterType(_ParameterAttributeHandler):
 
     """
 
-    # ChemicalEnvironment valence type string expected by SMARTS string for this Handler
-    _VALENCE_TYPE: Optional[str] = None
     # The string mapping to this ParameterType in a SMIRNOFF data source
     _ELEMENT_NAME: Optional[str] = None
 
@@ -1718,17 +1726,6 @@ class ParameterType(_ParameterAttributeHandler):
     smirks = ParameterAttribute()
     id = ParameterAttribute(default=None)
     parent_id = ParameterAttribute(default=None)
-
-    @smirks.converter
-    def smirks(self, attr, smirks):
-        # Validate the SMIRKS string to ensure it matches the expected
-        # parameter type, raising an exception if it is invalid or doesn't
-        # tag a valid set of atoms.
-
-        # TODO: Add check to make sure we can't make tree non-hierarchical
-        #       This would require parameter type knows which ParameterList it belongs to
-        ChemicalEnvironment.validate_smirks(smirks, validate_valence_type=True)
-        return smirks
 
     def __init__(self, smirks, allow_cosmetic_attributes=False, **kwargs):
         """
@@ -1807,7 +1804,7 @@ class ParameterHandler(_ParameterAttributeHandler):
         SMIRNOFFVersionError if an incompatible version is passed in.
 
         """
-        from openff.toolkit.typing.engines.smirnoff import SMIRNOFFVersionError
+        from openff.toolkit.utils.exceptions import SMIRNOFFVersionError
 
         if isinstance(new_version, Version):
             pass
@@ -1876,12 +1873,7 @@ class ParameterHandler(_ParameterAttributeHandler):
             attribute of the parameter. If False, non-spec kwargs will raise an exception.
 
         """
-        unitless_kwargs, attached_units = extract_serialized_units_from_dict(
-            section_dict
-        )
-        smirnoff_data = attach_units(unitless_kwargs, attached_units)
-
-        for key, val in smirnoff_data.items():
+        for key, val in section_dict.items():
             if self._INFOTYPE is not None:
                 element_name = self._INFOTYPE._ELEMENT_NAME
                 # Skip sections that aren't the parameter list
@@ -1893,9 +1885,7 @@ class ParameterHandler(_ParameterAttributeHandler):
 
             # If we're reading the parameter list, iterate through and attach units to
             # each parameter_dict, then use it to initialize a ParameterType
-            for unitless_param_dict in val:
-
-                param_dict = attach_units(unitless_param_dict, attached_units)
+            for param_dict in val:
                 new_parameter = self._INFOTYPE(
                     **param_dict, allow_cosmetic_attributes=allow_cosmetic_attributes
                 )
@@ -1972,7 +1962,6 @@ class ParameterHandler(_ParameterAttributeHandler):
         key = key if parameter is None else parameter.smirks
 
         for index, existing_parameter in enumerate(self._parameters):
-
             if existing_parameter.smirks != key:
                 continue
 
@@ -2016,7 +2005,7 @@ class ParameterHandler(_ParameterAttributeHandler):
 
         Given an existing parameter handler and a new parameter to add to it:
 
-        >>> from openmm import unit
+        >>> from openff.units import unit
         >>> bh = BondHandler(skip_version_check=True)
         >>> length = 1.5 * unit.angstrom
         >>> k = 100 * unit.kilocalorie / unit.mole / unit.angstrom ** 2
@@ -2096,7 +2085,7 @@ class ParameterHandler(_ParameterAttributeHandler):
 
         Create a parameter handler and populate it with some data.
 
-        >>> from openmm import unit
+        >>> from openff.units import unit
         >>> handler = BondHandler(skip_version_check=True)
         >>> handler.add_parameter(
         ...     {
@@ -2109,7 +2098,7 @@ class ParameterHandler(_ParameterAttributeHandler):
         Look up, from this handler, all parameters matching some SMIRKS pattern
 
         >>> handler.get_parameter({'smirks': '[*:1]-[*:2]'})
-        [<BondType with smirks: [*:1]-[*:2]  length: 1 A  k: 10 kcal/(A**2 mol)  >]
+        [<BondType with smirks: [*:1]-[*:2]  length: 1 angstrom  k: 10.0 kilocalorie / angstrom ** 2 / mole  >]
 
         """
         params = list()
@@ -2260,7 +2249,6 @@ class ParameterHandler(_ParameterAttributeHandler):
         reference_molecule = match.environment_match.reference_molecule
 
         for connectivity in expected_connectivity:
-
             atom_i = match.environment_match.reference_atom_indices[connectivity[0]]
             atom_j = match.environment_match.reference_atom_indices[connectivity[1]]
 
@@ -2280,7 +2268,7 @@ class ParameterHandler(_ParameterAttributeHandler):
 
     def to_dict(self, discard_cosmetic_attributes=False):
         """
-        Convert this ParameterHandler to an OrderedDict, compliant with the SMIRNOFF data spec.
+        Convert this ParameterHandler to a dict, compliant with the SMIRNOFF data spec.
 
         Parameters
         ----------
@@ -2289,11 +2277,11 @@ class ParameterHandler(_ParameterAttributeHandler):
 
         Returns
         -------
-        smirnoff_data : OrderedDict
+        smirnoff_data : dict
             SMIRNOFF-spec compliant representation of this ParameterHandler and its internal ParameterList.
 
         """
-        smirnoff_data = OrderedDict()
+        smirnoff_data = dict()
 
         # Populate parameter list
         parameter_list = self._parameters.to_list(
@@ -2397,7 +2385,6 @@ class ConstraintHandler(ParameterHandler):
         .. warning :: This API is experimental and subject to change.
         """
 
-        _VALENCE_TYPE = "Bond"
         _ELEMENT_NAME = "Constraint"
 
         distance = ParameterAttribute(default=None, unit=unit.angstrom)
@@ -2419,8 +2406,6 @@ class BondHandler(ParameterHandler):
         .. warning :: This API is experimental and subject to change.
         """
 
-        # ChemicalEnvironment valence type string expected by SMARTS string for this Handler
-        _VALENCE_TYPE = "Bond"
         _ELEMENT_NAME = "Bond"
 
         length = ParameterAttribute(default=None, unit=unit.angstrom)
@@ -2559,7 +2544,6 @@ class AngleHandler(ParameterHandler):
         .. warning :: This API is experimental and subject to change.
         """
 
-        _VALENCE_TYPE = "Angle"  # ChemicalEnvironment valence type string expected by SMARTS string for this Handler
         _ELEMENT_NAME = "Angle"
 
         angle = ParameterAttribute(unit=unit.degree)
@@ -2605,7 +2589,6 @@ class ProperTorsionHandler(ParameterHandler):
         .. warning :: This API is experimental and subject to change.
         """
 
-        _VALENCE_TYPE = "ProperTorsion"
         _ELEMENT_NAME = "Proper"
 
         periodicity = IndexedParameterAttribute(converter=int)
@@ -2680,7 +2663,6 @@ class ImproperTorsionHandler(ParameterHandler):
         .. warning :: This API is experimental and subject to change.
         """
 
-        _VALENCE_TYPE = "ImproperTorsion"
         _ELEMENT_NAME = "Improper"
 
         periodicity = IndexedParameterAttribute(converter=int)
@@ -2764,7 +2746,6 @@ class vdWHandler(_NonbondedHandler):
         .. warning :: This API is experimental and subject to change.
         """
 
-        _VALENCE_TYPE = "Atom"  # ChemicalEnvironment valence type expected for SMARTS
         _ELEMENT_NAME = "Atom"
 
         epsilon = ParameterAttribute(unit=unit.kilocalorie / unit.mole)
@@ -3095,7 +3076,6 @@ class LibraryChargeHandler(_NonbondedHandler):
         .. warning :: This API is experimental and subject to change.
         """
 
-        _VALENCE_TYPE = None  # This disables the connectivity check when parsing LibraryChargeType objects
         _ELEMENT_NAME = "LibraryCharge"
 
         name = ParameterAttribute(default=None)
@@ -3211,7 +3191,6 @@ class ChargeIncrementModelHandler(_NonbondedHandler):
         .. warning :: This API is experimental and subject to change.
         """
 
-        _VALENCE_TYPE = None  # This disables the connectivity check when parsing LibraryChargeType objects
         _ELEMENT_NAME = "ChargeIncrement"
 
         charge_increment = IndexedParameterAttribute(unit=unit.elementary_charge)
@@ -3305,7 +3284,6 @@ class GBSAHandler(ParameterHandler):
         .. warning :: This API is experimental and subject to change.
         """
 
-        _VALENCE_TYPE = "Atom"
         _ELEMENT_NAME = "Atom"
 
         radius = ParameterAttribute(unit=unit.angstrom)
@@ -3380,8 +3358,6 @@ class VirtualSiteHandler(_NonbondedHandler):
     """
 
     class VirtualSiteType(vdWHandler.vdWType):
-
-        _VALENCE_TYPE = None  # type: ignore[assignment]
         _ELEMENT_NAME = "VirtualSite"
 
         name = ParameterAttribute(default="EP", converter=str)
@@ -3425,7 +3401,6 @@ class VirtualSiteHandler(_NonbondedHandler):
 
         @outOfPlaneAngle.converter
         def outOfPlaneAngle(self, attr, value):
-
             if value == "None":
                 return
 
@@ -3442,7 +3417,6 @@ class VirtualSiteHandler(_NonbondedHandler):
 
         @inPlaneAngle.converter
         def inPlaneAngle(self, attr, value):
-
             if value == "None":
                 return
 
@@ -3458,7 +3432,6 @@ class VirtualSiteHandler(_NonbondedHandler):
             return value
 
         def __init__(self, **kwargs):
-
             self._add_default_init_kwargs(kwargs)
             super().__init__(**kwargs)
 
@@ -3511,7 +3484,6 @@ class VirtualSiteHandler(_NonbondedHandler):
             )
 
             if not cls._supports_match(type_, match, is_in_plane):
-
                 raise SMIRNOFFSpecError(
                     f"match='{match}' not supported with type='{type_}'"
                     + ("" if is_in_plane is None else f" and is_in_plane={is_in_plane}")
@@ -3544,7 +3516,6 @@ class VirtualSiteHandler(_NonbondedHandler):
         def _supports_match(
             cls, type_: _VirtualSiteType, match: str, is_in_plane: Optional[bool] = None
         ) -> bool:
-
             is_in_plane = True if is_in_plane is None else is_in_plane
 
             if match == "once":
@@ -3627,7 +3598,6 @@ class VirtualSiteHandler(_NonbondedHandler):
             )
 
     def check_handler_compatibility(self, other_handler):
-
         self._check_attributes_are_equal(
             other_handler, identical_attrs=["exclusion_policy"]
         )
@@ -3667,13 +3637,11 @@ class VirtualSiteHandler(_NonbondedHandler):
         expected_type, expected_smirks, expected_name = key
 
         for i, existing_parameter in enumerate(self.parameters):
-
             if (
                 existing_parameter.type != expected_type
                 or existing_parameter.smirks != expected_smirks
                 or existing_parameter.name != expected_name
             ):
-
                 continue
 
             return i
@@ -3681,7 +3649,6 @@ class VirtualSiteHandler(_NonbondedHandler):
         return None
 
     def _find_matches_by_parent(self, entity: Topology) -> Dict[int, list]:
-
         from collections import defaultdict
 
         topology_atoms = {
@@ -3694,7 +3661,6 @@ class VirtualSiteHandler(_NonbondedHandler):
         matches_by_parent: Dict = defaultdict(lambda: defaultdict(list))
 
         for parameter in self._parameters:
-
             for match in entity.chemical_environment_matches(parameter.smirks):
                 parent_index = match.topology_atom_indices[parameter.parent_index]
 
@@ -3709,9 +3675,7 @@ class VirtualSiteHandler(_NonbondedHandler):
         assigned_matches_by_parent = defaultdict(list)
 
         for parent_index, matches_by_name in matches_by_parent.items():
-
             for name, matches in matches_by_name.items():
-
                 assigned_parameter, _ = matches[-1]  # last match wins
 
                 match_orientations = [
@@ -3750,15 +3714,12 @@ class VirtualSiteHandler(_NonbondedHandler):
         transformed_dict_cls=dict,
         unique=False,
     ) -> Dict[Tuple[int], List[ParameterHandler._Match]]:
-
         assigned_matches_by_parent = self._find_matches_by_parent(entity)
         return_dict = {}
         for parent_index, assigned_parameters in assigned_matches_by_parent.items():
             assigned_matches = []
             for assigned_parameter, match_orientations in assigned_parameters:
-
                 for match in match_orientations:
-
                     assigned_matches.append(
                         ParameterHandler._Match(assigned_parameter, match)
                     )

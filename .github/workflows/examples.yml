@@ -37,11 +37,11 @@ jobs:
     env:
       OE_LICENSE: ${{ github.workspace }}/oe_license.txt
       PACKAGE: openff
-      PYTEST_ARGS: -r fE --tb=short --cov=openff --cov-config=setup.cfg --cov-append --cov-report=xml
-      NB_ARGS: -v --nbval-lax --ignore=examples/deprecated
+      PYTEST_ARGS: -r fE --tb=short
+      NB_ARGS: -v --nbval-lax --ignore=examples/deprecated --durations=20
 
     steps:
-      - uses: actions/checkout@v3.0.2
+      - uses: actions/checkout@v3
         with:
           fetch-depth: 2
 
@@ -73,7 +73,6 @@ jobs:
           ulimit -a
 
       - name: Make oe_license.txt file from GH org secret "OE_LICENSE"
-        shell: bash
         env:
           OE_LICENSE_TEXT: ${{ secrets.OE_LICENSE }}
         run: |
@@ -84,7 +83,7 @@ jobs:
           # Maybe remove the packaged openff-toolkit, installed as a dependency of openmmforcefields
           # and/or Interchange
           conda remove --force openff-toolkit-base
-          python setup.py develop --no-deps
+          python -m pip install .
 
       - name: Remove undesired toolkits
         run: |
@@ -96,6 +95,15 @@ jobs:
               if [[ $(conda list | grep $cpkg) ]]; then conda remove --force $cpkg --yes ; fi
             done
           fi
+
+      - name: Reinstall ParmEd
+        if: ${{ matrix.rdkit == false }}
+        run: |
+          micromamba remove --force parmed --yes
+          # See #1531, #1532, eventually this should work with 4 or 3 and 4
+          micromamba install "parmed =3" -c conda-forge -yq
+          # Needed for other examples to run, but were removed incidentally alongside AmberTools
+          micromamba install h5py -c conda-forge -yq
 
       - name: Check installed toolkits
         run: |
@@ -133,14 +141,4 @@ jobs:
             NB_ARGS+=" --ignore=examples/using_smirnoff_in_amber_or_gromacs"
           fi
 
-          # openmmforcefields incompatible with new toolkit
-          NB_ARGS+=" --ignore=examples/external/swap_amber_parameters/swap_existing_ligand_parameters_with_openmmforcefields.ipynb"
-
-          python -m pytest $NB_ARGS examples
-
-      - name: Codecov
-        uses: codecov/codecov-action@v3.1.0
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          file: ./coverage.xml
-          fail_ci_if_error: true
+          python -m pytest $PYTEST_ARGS $NB_ARGS examples

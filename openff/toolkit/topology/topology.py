@@ -13,7 +13,7 @@ Class definitions to represent a molecular system and its chemical components
 """
 import itertools
 import warnings
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from collections.abc import MutableMapping
 from contextlib import nullcontext
 from copy import deepcopy
@@ -22,6 +22,7 @@ from typing import (
     TYPE_CHECKING,
     Dict,
     Generator,
+    Iterable,
     Iterator,
     List,
     Literal,
@@ -32,15 +33,20 @@ from typing import (
 )
 
 import numpy as np
+from networkx import Graph
 from numpy.typing import NDArray
-from openff.units import Quantity, unit
+from openff.units import Quantity, ensure_quantity, unit
 from openff.utilities import requires_package
+from typing_extensions import TypeAlias
 
 from openff.toolkit.topology import Molecule
 from openff.toolkit.topology._mm_molecule import _SimpleBond, _SimpleMolecule
-from openff.toolkit.topology.molecule import HierarchyElement
-from openff.toolkit.typing.chemistry import ChemicalEnvironment
+from openff.toolkit.topology.molecule import FrozenMolecule, HierarchyElement
 from openff.toolkit.utils import quantity_to_string, string_to_quantity
+from openff.toolkit.utils.constants import (
+    ALLOWED_AROMATICITY_MODELS,
+    DEFAULT_AROMATICITY_MODEL,
+)
 from openff.toolkit.utils.exceptions import (
     AtomNotInTopologyError,
     DuplicateUniqueMoleculeError,
@@ -54,16 +60,18 @@ from openff.toolkit.utils.exceptions import (
     WrongShapeError,
 )
 from openff.toolkit.utils.serialization import Serializable
-from openff.toolkit.utils.toolkits import (
-    ALLOWED_AROMATICITY_MODELS,
-    DEFAULT_AROMATICITY_MODEL,
-    GLOBAL_TOOLKIT_REGISTRY,
-)
+from openff.toolkit.utils.toolkits import GLOBAL_TOOLKIT_REGISTRY
 
 if TYPE_CHECKING:
+    import mdtraj
+    import openmm.app
     from openmm.unit import Quantity as OMMQuantity
 
-    from openff.toolkit.topology.molecule import Atom
+    from openff.toolkit.topology.molecule import Atom, Bond
+    from openff.toolkit.utils.toolkits import ToolkitRegistry, ToolkitWrapper
+
+
+TKR: TypeAlias = Union["ToolkitRegistry", "ToolkitWrapper"]
 
 
 def _topology_deprecation(old_method, new_method):
@@ -104,7 +112,7 @@ class _TransformedDict(MutableMapping):
     """
 
     def __init__(self, *args, **kwargs):
-        self.store = OrderedDict()
+        self.store = dict()
         self.update(dict(*args, **kwargs))  # use the free update to set keys
 
     def __getitem__(self, key):
@@ -130,7 +138,7 @@ class _TransformedDict(MutableMapping):
         return key
 
     @classmethod
-    def _return_possible_index_of(cls, key, possible=[], permutations={}):
+    def _return_possible_index_of(cls, key, possible, permutations):
         """
         Returns canonical ordering of ``key``, given a dictionary of ordered
         ``permutations`` and a list of allowed orders ``possible``.
@@ -258,7 +266,6 @@ class TagSortedDict(_TransformedDict):
     """
 
     def __init__(self, *args, **kwargs):
-
         # Because keytransform is O(n) due to needing to check the sorted keys,
         # we cache the sorted keys separately to make keytransform O(1) at
         # the expense of storage. This is also better in the long run if the
@@ -358,16 +365,14 @@ class ImproperDict(_TransformedDict):
         key = tuple(key)
         assert len(key) == 4
         refkey = cls.key_transform(key)
-        permutations = OrderedDict(
-            {
-                (refkey[0], refkey[1], refkey[2], refkey[3]): 0,
-                (refkey[0], refkey[1], refkey[3], refkey[2]): 1,
-                (refkey[2], refkey[1], refkey[0], refkey[3]): 2,
-                (refkey[2], refkey[1], refkey[3], refkey[0]): 3,
-                (refkey[3], refkey[1], refkey[0], refkey[2]): 4,
-                (refkey[3], refkey[1], refkey[2], refkey[0]): 5,
-            }
-        )
+        permutations = {
+            (refkey[0], refkey[1], refkey[2], refkey[3]): 0,
+            (refkey[0], refkey[1], refkey[3], refkey[2]): 1,
+            (refkey[2], refkey[1], refkey[0], refkey[3]): 2,
+            (refkey[2], refkey[1], refkey[3], refkey[0]): 3,
+            (refkey[3], refkey[1], refkey[0], refkey[2]): 4,
+            (refkey[3], refkey[1], refkey[2], refkey[0]): 5,
+        }
         if possible is not None:
             return cls._return_possible_index_of(
                 key, possible=possible, permutations=permutations
@@ -433,8 +438,7 @@ class Topology(Serializable):
         from openff.toolkit.topology.molecule import FrozenMolecule
 
         # Assign cheminformatics models
-        model = DEFAULT_AROMATICITY_MODEL
-        self._aromaticity_model = model
+        self._aromaticity_model = DEFAULT_AROMATICITY_MODEL
 
         # Initialize storage
         self._initialize()
@@ -444,14 +448,13 @@ class Topology(Serializable):
             self.copy_initializer(other)
         elif isinstance(other, FrozenMolecule):
             self.from_molecules([other])
-        elif isinstance(other, OrderedDict):
+        elif isinstance(other, dict):
             self._initialize_from_dict(other)
 
     def _initialize(self):
         """
         Initializes a blank Topology.
         """
-        self._aromaticity_model = DEFAULT_AROMATICITY_MODEL
         self._constrained_atom_pairs = dict()
         self._box_vectors = None
         self._molecules = list()
@@ -513,7 +516,7 @@ class Topology(Serializable):
         return len(self.identical_molecule_groups)
 
     @classmethod
-    def from_molecules(cls, molecules: Union[Molecule, List[Molecule]]):
+    def from_molecules(cls, molecules: Union[Molecule, List[Molecule]]) -> "Topology":
         """
         Create a new Topology object containing one copy of each of the specified molecule(s).
 
@@ -528,7 +531,7 @@ class Topology(Serializable):
             The Topology created from the specified molecule(s)
         """
         # Ensure that we are working with an iterable
-        if isinstance(molecules, (Molecule, _SimpleMolecule)):
+        if isinstance(molecules, (FrozenMolecule, _SimpleMolecule)):
             molecules = [molecules]
 
         # Create Topology and populate it with specified molecules
@@ -539,7 +542,7 @@ class Topology(Serializable):
 
         return topology
 
-    def assert_bonded(self, atom1, atom2):
+    def assert_bonded(self, atom1: Union[int, "Atom"], atom2: Union[int, "Atom"]):
         """
         Raise an exception if the specified atoms are not bonded in the topology.
 
@@ -549,19 +552,16 @@ class Topology(Serializable):
             The atoms or atom topology indices to check to ensure they are bonded
 
         """
-        if (type(atom1) is int) and (type(atom2) is int):
+        if isinstance(atom1, int) and isinstance(atom2, int):
             atom1 = self.atom(atom1)
             atom2 = self.atom(atom2)
 
-        # else:
         if not (self.is_bonded(atom1, atom2)):
             # TODO: Raise more specific exception.
-            raise Exception(
-                "Atoms {} and {} are not bonded in topology".format(atom1, atom2)
-            )
+            raise Exception(f"Atoms {atom1} and {atom2} are not bonded in topology")
 
     @property
-    def aromaticity_model(self):
+    def aromaticity_model(self) -> str:
         """
         Get the aromaticity model applied to all molecules in the topology.
 
@@ -582,12 +582,12 @@ class Topology(Serializable):
         aromaticity_model : str
             Aromaticity model to use. One of: ['OEAroModel_MDL']
         """
-
         if aromaticity_model not in ALLOWED_AROMATICITY_MODELS:
-            msg = "Aromaticity model must be one of {}; specified '{}'".format(
-                ALLOWED_AROMATICITY_MODELS, aromaticity_model
+            raise InvalidAromaticityModelError(
+                f"Read aromaticity model {aromaticity_model} which is not in the set of allowed aromaticity models:  "
+                f"{ALLOWED_AROMATICITY_MODELS}."
             )
-            raise InvalidAromaticityModelError(msg)
+
         self._aromaticity_model = aromaticity_model
 
     @property
@@ -616,7 +616,14 @@ class Topology(Serializable):
             self._box_vectors = None
             return
         if not hasattr(box_vectors, "units"):
-            raise InvalidBoxVectorsError("Given unitless box vectors")
+            if hasattr(box_vectors, "unit"):
+                # this is probably an openmm.unit.Quantity; we should gracefully import OpenMM but
+                # the chances of this being an object with the two previous conditions met is low
+                box_vectors = ensure_quantity(box_vectors, "openff")
+
+            else:
+                raise InvalidBoxVectorsError("Given unitless box vectors")
+
         # Unit.compatible_units() returns False with itself, for some reason
         if (box_vectors.units != unit.nm) and (
             box_vectors.units not in unit.nm.compatible_units()
@@ -734,7 +741,7 @@ class Topology(Serializable):
             for atom in molecule.atoms:
                 yield atom
 
-    def atom_index(self, atom):
+    def atom_index(self, atom: "Atom") -> int:
         """
         Returns the index of a given atom in this topology
 
@@ -760,9 +767,9 @@ class Topology(Serializable):
         if "_topology_atom_index" not in atom.__dict__:
             raise AtomNotInTopologyError("Atom not found in this Topology")
 
-        return atom._topology_atom_index
+        return atom._topology_atom_index  # type: ignore[attr-defined]
 
-    def molecule_index(self, molecule):
+    def molecule_index(self, molecule: Molecule) -> int:
         """
         Returns the index of a given molecule in this topology
 
@@ -786,7 +793,7 @@ class Topology(Serializable):
 
         raise MoleculeNotInTopologyError("Molecule not found in this Topology")
 
-    def molecule_atom_start_index(self, molecule):
+    def molecule_atom_start_index(self, molecule: Molecule) -> int:
         """
         Returns the index of a molecule's first atom in this topology
 
@@ -801,7 +808,7 @@ class Topology(Serializable):
         return self.atom_index(molecule.atoms[0])
 
     @property
-    def n_bonds(self):
+    def n_bonds(self) -> int:
         """
         Returns the number of Bonds in in this Topology.
 
@@ -815,7 +822,7 @@ class Topology(Serializable):
         return n_bonds
 
     @property
-    def bonds(self):
+    def bonds(self) -> Generator["Bond", None, None]:
         """Returns an iterator over the bonds in this Topology
 
         Returns
@@ -827,43 +834,43 @@ class Topology(Serializable):
                 yield bond
 
     @property
-    def n_angles(self):
+    def n_angles(self) -> int:
         """int: number of angles in this Topology."""
         return sum(mol.n_angles for mol in self._molecules)
 
     @property
-    def angles(self):
+    def angles(self) -> Generator[Tuple["Atom", ...], None, None]:
         """Iterable of Tuple[Atom]: iterator over the angles in this Topology."""
         for molecule in self._molecules:
             for angle in molecule.angles:
                 yield angle
 
     @property
-    def n_propers(self):
+    def n_propers(self) -> int:
         """int: number of proper torsions in this Topology."""
         return sum(mol.n_propers for mol in self._molecules)
 
     @property
-    def propers(self):
+    def propers(self) -> Generator[Tuple["Atom", ...], None, None]:
         """Iterable of Tuple[TopologyAtom]: iterator over the proper torsions in this Topology."""
         for molecule in self.molecules:
             for proper in molecule.propers:
                 yield proper
 
     @property
-    def n_impropers(self):
+    def n_impropers(self) -> int:
         """int: number of possible improper torsions in this Topology."""
         return sum(mol.n_impropers for mol in self._molecules)
 
     @property
-    def impropers(self):
+    def impropers(self) -> Generator[Tuple["Atom", ...], None, None]:
         """Iterable of Tuple[TopologyAtom]: iterator over the possible improper torsions in this Topology."""
         for molecule in self._molecules:
             for improper in molecule.impropers:
                 yield improper
 
     @property
-    def smirnoff_impropers(self):
+    def smirnoff_impropers(self) -> Generator[Tuple["Atom", ...], None, None]:
         """
         Iterate over improper torsions in the molecule, but only those with
         trivalent centers, reporting the central atom second in each improper.
@@ -902,7 +909,7 @@ class Topology(Serializable):
                 yield smirnoff_improper
 
     @property
-    def amber_impropers(self):
+    def amber_impropers(self) -> Generator[Tuple["Atom", ...], None, None]:
         """
         Iterate over improper torsions in the molecule, but only those with
         trivalent centers, reporting the central atom first in each improper.
@@ -1004,10 +1011,10 @@ class Topology(Serializable):
 
     def chemical_environment_matches(
         self,
-        query,
-        aromaticity_model="MDL",
-        unique=False,
-        toolkit_registry=GLOBAL_TOOLKIT_REGISTRY,
+        query: str,
+        aromaticity_model: str = "MDL",
+        unique: bool = False,
+        toolkit_registry: TKR = GLOBAL_TOOLKIT_REGISTRY,
     ):
         """
         Retrieve all matches for a given chemical environment query.
@@ -1019,9 +1026,8 @@ class Topology(Serializable):
 
         Parameters
         ----------
-        query : str or ChemicalEnvironment
-            SMARTS string (with one or more tagged atoms) or ``ChemicalEnvironment`` query
-            Query will internally be resolved to SMARTS using ``query.as_smarts()`` if it has an ``.as_smarts`` method.
+        query : str
+            SMARTS string (with one or more tagged atoms)
         aromaticity_model : str
             Override the default aromaticity model for this topology and use the specified aromaticity model instead.
             Allowed values: ['MDL']
@@ -1034,10 +1040,8 @@ class Topology(Serializable):
         """
 
         # Render the query to a SMARTS string
-        if type(query) is str:
+        if isinstance(query, str):
             smarts = query
-        elif type(query) is ChemicalEnvironment:
-            smarts = query.as_smarts()
         else:
             raise ValueError(
                 f"Don't know how to convert query '{query}' into SMARTS string"
@@ -1067,7 +1071,6 @@ class Topology(Serializable):
                 mol_instance = self.molecule(mol_instance_idx)
                 # Loop over matches
                 for match in mol_matches:
-
                     # Collect indices of matching TopologyAtoms.
                     topology_atom_indices = []
                     for molecule_atom_index in match:
@@ -1107,18 +1110,24 @@ class Topology(Serializable):
         >>> # Create a water ordered as OHH
         >>> water1 = Molecule()
         >>> water1.add_atom(8, 0, False)
+        0
         >>> water1.add_atom(1, 0, False)
+        1
         >>> water1.add_atom(1, 0, False)
-        >>> water1.add_bond(0, 1, 1, False)
-        >>> water1.add_bond(0, 2, 1, False)
+        2
+        >>> _ = water1.add_bond(0, 1, 1, False)
+        >>> _ = water1.add_bond(0, 2, 1, False)
         ...
         >>> # Create a different water ordered as HOH
         >>> water2 = Molecule()
         >>> water2.add_atom(1, 0, False)
+        0
         >>> water2.add_atom(8, 0, False)
+        1
         >>> water2.add_atom(1, 0, False)
-        >>> water2.add_bond(0, 1, 1, False)
-        >>> water2.add_bond(1, 2, 1, False)
+        2
+        >>> _ = water2.add_bond(0, 1, 1, False)
+        >>> _ = water2.add_bond(1, 2, 1, False)
         ...
         >>> top = Topology.from_molecules([water1, water2])
         >>> top.identical_molecule_groups
@@ -1236,13 +1245,13 @@ class Topology(Serializable):
         return return_dict
 
     @classmethod
-    def from_dict(cls, topology_dict):
+    def from_dict(cls, topology_dict: dict):
         """
         Create a new Topology from a dictionary representation
 
         Parameters
         ----------
-        topology_dict : OrderedDict
+        topology_dict : dict
             A dictionary representation of the topology.
 
         Returns
@@ -1305,6 +1314,7 @@ class Topology(Serializable):
 
     @classmethod
     @requires_package("openmm")
+<<<<<<< HEAD
     def from_pdb_and_monomer_info(
         cls,
         file_path: str,
@@ -1438,26 +1448,57 @@ class Topology(Serializable):
     @classmethod
     @requires_package("openmm")
     def from_openmm(cls, openmm_topology, unique_molecules=None):
+=======
+    def from_openmm(
+        cls,
+        openmm_topology: "openmm.app.Topology",
+        unique_molecules: Optional[Iterable[FrozenMolecule]] = None,
+        positions: Union[None, Quantity, "OMMQuantity"] = None,
+    ) -> "Topology":
+>>>>>>> main
         """
         Construct an OpenFF Topology object from an OpenMM Topology object.
 
-        This method guarantees that the order of atoms in the input OpenMM Topology will be the same as the ordering
-        of atoms in the output OpenFF Topology. However it does not guarantee the order of the bonds will be the same.
+        This method guarantees that the order of atoms in the input OpenMM
+        Topology will be the same as the ordering of atoms in the output OpenFF
+        Topology. However it does not guarantee the order of the bonds will be
+        the same.
+
+        Hierarchy schemes are taken from the OpenMM topology, not from
+        ``unique_molecules``.
 
         Parameters
         ----------
-        openmm_topology : openmm.app.Topology
-            An OpenMM Topology object
-        unique_molecules : iterable of objects that can be used to construct unique Molecule objects
-            All unique molecules must be provided, in any order, though multiple copies of each molecule are allowed.
-            The atomic elements and bond connectivity will be used to match the reference molecules
-            to molecule graphs appearing in the OpenMM ``Topology``. If bond orders are present in the
-            OpenMM ``Topology``, these will be used in matching as well.
+        openmm_topology
+            The OpenMM Topology object to convert
+        unique_molecules
+            An iterable containing all the unique molecules in the topology.
+            This is used to identify the molecules in the OpenMM topology and
+            provide any missing chemical information. Each chemical species in
+            the topology must be specified exactly once, though the topology
+            may have any number of copies, including zero. The chemical
+            elements of atoms and their bond connectivity will be used to match
+            these reference molecules to the molecules appearing in the
+            topology. If bond orders are specified in the topology, these will
+            be used in matching as well.
+        positions
+            Positions for the atoms in the new topology.
 
         Returns
         -------
-        topology : openff.toolkit.topology.Topology
-            An OpenFF Topology object
+        topology
+            An OpenFF Topology object, constructed from the molecules in
+            ``unique_molecules``, with the same atom order as the input topology.
+
+        Raises
+        ------
+        MissingUniqueMoleculesError
+            If ``unique_molecules`` is ``None``
+        DuplicateUniqueMoleculeError
+            If the same connectivity graph is represented by two different
+            molecules in ``unique_molecules``
+        ValueError
+            If a chemically impossible molecule is detected in the topology
         """
         import networkx as nx
         from openff.units.openmm import from_openmm
@@ -1478,7 +1519,7 @@ class Topology(Serializable):
 
         # Convert all unique mols to graphs
         topology = cls()
-        graph_to_unq_mol = {}
+        graph_to_unq_mol: Dict[Graph, FrozenMolecule] = {}
         for unq_mol in unique_molecules:
             unq_mol_graph = unq_mol.to_networkx()
             for existing_graph in graph_to_unq_mol.keys():
@@ -1582,27 +1623,52 @@ class Topology(Serializable):
             unq_mol = graph_to_unq_mol[unq_mol_G]
             remapped_mol = unq_mol.remap(local_top_to_ref_index, current_to_new=False)
             # Transfer hierarchy metadata from openmm mol graph to offmol metadata
-            for omm_atom, off_atom in zip(omm_mol_G.nodes, remapped_mol.atoms):
-                off_atom.name = omm_mol_G.nodes[omm_atom]["atom_name"]
-                off_atom.metadata["residue_name"] = omm_mol_G.nodes[omm_atom][
+            for off_atom_idx in range(remapped_mol.n_atoms):
+                off_atom = remapped_mol.atom(off_atom_idx)
+
+                omm_atom_idx = off_atom_idx + first_index
+
+                off_atom.name = omm_mol_G.nodes[omm_atom_idx]["atom_name"]
+                off_atom.metadata["residue_name"] = omm_mol_G.nodes[omm_atom_idx][
                     "residue_name"
                 ]
                 off_atom.metadata["residue_number"] = int(
-                    omm_mol_G.nodes[omm_atom]["residue_id"]
+                    omm_mol_G.nodes[omm_atom_idx]["residue_id"]
                 )
-                off_atom.metadata["insertion_code"] = omm_mol_G.nodes[omm_atom][
+                off_atom.metadata["insertion_code"] = omm_mol_G.nodes[omm_atom_idx][
                     "insertion_code"
                 ]
 
-                off_atom.metadata["chain_id"] = omm_mol_G.nodes[omm_atom]["chain_id"]
+                off_atom.metadata["chain_id"] = omm_mol_G.nodes[omm_atom_idx][
+                    "chain_id"
+                ]
+
+            remapped_mol.add_default_hierarchy_schemes()
             topology._add_molecule_keep_cache(remapped_mol)
         topology._invalidate_cached_properties()
 
         if openmm_topology.getPeriodicBoxVectors() is not None:
             topology.box_vectors = from_openmm(openmm_topology.getPeriodicBoxVectors())
 
+        if positions is not None:
+            topology.set_positions(ensure_quantity(positions, "openff"))
+
         # TODO: How can we preserve metadata from the openMM topology when creating the OFF topology?
         return topology
+
+    def _ensure_unique_atom_names(self, ensure_unique_atom_names: Union[str, bool]):
+        """See `Topology.to_openmm`"""
+        if not ensure_unique_atom_names:
+            return
+        for molecule in self._molecules:
+            if isinstance(ensure_unique_atom_names, str) and hasattr(
+                molecule, ensure_unique_atom_names
+            ):
+                for hier_elem in getattr(molecule, ensure_unique_atom_names):
+                    if not hier_elem.has_unique_atom_names:
+                        hier_elem.generate_unique_atom_names()
+            elif not molecule.has_unique_atom_names:
+                molecule.generate_unique_atom_names()
 
     @requires_package("openmm")
     def to_openmm(self, ensure_unique_atom_names: Union[str, bool] = "residues"):
@@ -1653,17 +1719,7 @@ class Topology(Serializable):
         off_topology = Topology(self)
         omm_topology = app.Topology()
 
-        # Create unique atom names
-        if ensure_unique_atom_names:
-            for molecule in off_topology._molecules:
-                if isinstance(ensure_unique_atom_names, str) and hasattr(
-                    molecule, ensure_unique_atom_names
-                ):
-                    for hier_elem in getattr(molecule, ensure_unique_atom_names):
-                        if not hier_elem.has_unique_atom_names:
-                            hier_elem.generate_unique_atom_names()
-                elif not molecule.has_unique_atom_names:
-                    molecule.generate_unique_atom_names()
+        off_topology._ensure_unique_atom_names(ensure_unique_atom_names)
 
         # Go through atoms in OpenFF to preserve the order.
         omm_atoms = []
@@ -1947,27 +2003,60 @@ class Topology(Serializable):
 
     @classmethod
     @requires_package("mdtraj")
-    def from_mdtraj(cls, mdtraj_topology, unique_molecules=None):
+    def from_mdtraj(
+        cls,
+        mdtraj_topology: "mdtraj.Topology",
+        unique_molecules: Optional[Iterable[FrozenMolecule]] = None,
+        positions: Union[None, "OMMQuantity", Quantity] = None,
+    ):
         """
-        Construct an OpenFF Topology object from an MDTraj Topology object.
+        Construct an OpenFF ``Topology`` from an MDTraj ``Topology``
+
+        This method guarantees that the order of atoms in the input MDTraj
+        Topology will be the same as the ordering of atoms in the output OpenFF
+        Topology. However it does not guarantee the order of the bonds will be
+        the same.
+
+        Hierarchy schemes are taken from the MDTraj topology, not from
+        ``unique_molecules``.
 
         Parameters
         ----------
-        mdtraj_topology : mdtraj.Topology
-            An MDTraj Topology object
-        unique_molecules : iterable of objects that can be used to construct unique Molecule objects
-            All unique molecules must be provided, in any order, though multiple copies of each molecule are allowed.
-            The atomic elements and bond connectivity will be used to match the reference molecules
-            to molecule graphs appearing in the MDTraj ``Topology``. If bond orders are present in the
-            MDTraj ``Topology``, these will be used in matching as well.
+        mdtraj_topology
+            The MDTraj Topology object to convert
+        unique_molecules
+            An iterable containing all the unique molecules in the topology.
+            This is used to identify the molecules in the MDTraj topology and
+            provide any missing chemical information. Each chemical species in
+            the topology must be specified exactly once, though the topology
+            may have any number of copies, including zero. The chemical
+            elements of atoms and their bond connectivity will be used to match
+            these reference molecules to the molecules appearing in the
+            topology. If bond orders are specified in the topology, these will
+            be used in matching as well.
+        positions
+            Positions for the atoms in the new topology.
 
         Returns
         -------
-        topology : openff.toolkit.topology.Topology
-            An OpenFF Topology object
+        topology
+            An OpenFF Topology object, constructed from the molecules in
+            ``unique_molecules``, with the same atom order as the input topology.
+
+        Raises
+        ------
+        MissingUniqueMoleculesError
+            If ``unique_molecules`` is ``None``
+        DuplicateUniqueMoleculeError
+            If the same connectivity graph is represented by two different
+            molecules in ``unique_molecules``
+        ValueError
+            If a chemically impossible molecule is detected in the topology
         """
         return cls.from_openmm(
-            mdtraj_topology.to_openmm(), unique_molecules=unique_molecules
+            mdtraj_topology.to_openmm(),
+            unique_molecules=unique_molecules,
+            positions=positions,
         )
 
     # Avoid removing this method, even though it is private and would not be difficult for most
@@ -2036,9 +2125,7 @@ class Topology(Serializable):
             openmm_chain = topology.addChain(chain.GetChainID())
 
             for frag in chain.GetFragments():
-
                 for hres in frag.GetResidues():
-
                     # Get OE residue
                     oe_res = hres.GetOEResidue()
                     # Create OpenMM residue
@@ -2199,6 +2286,8 @@ class Topology(Serializable):
             An OpenEye molecule
         positions : unit-wrapped array with shape [nparticles,3], optional, default=None
             Positions to use in constructing OEMol.
+        aromaticity_model : str, optional, default="OEAroModel_MDL"
+            The aromaticity model to use. Only OEAroModel_MDL is supported.
 
         NOTE: This comes from https://github.com/oess/oeommtools/blob/master/oeommtools/utils.py
 

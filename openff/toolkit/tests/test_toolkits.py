@@ -38,6 +38,7 @@ from openff.toolkit.utils.exceptions import (
     InvalidIUPACNameError,
     InvalidToolkitError,
     NotAttachedToMoleculeError,
+    RadicalsNotSupportedError,
     ToolkitUnavailableException,
     UndefinedStereochemistryError,
 )
@@ -245,7 +246,6 @@ openeye_iupac_bad_stereo = [
 
 @pytest.fixture()
 def formic_acid_molecule() -> Molecule:
-
     formic_acid = Molecule()
     formic_acid.add_atom(8, 0, False)  # O1
     formic_acid.add_atom(6, 0, False)  # C1
@@ -262,7 +262,6 @@ def formic_acid_molecule() -> Molecule:
 
 @pytest.fixture()
 def formic_acid_conformers() -> Dict[str, unit.Quantity]:
-
     return {
         "cis": unit.Quantity(
             np.array(
@@ -335,6 +334,15 @@ class TestOpenEyeToolkitWrapper:
                 )
             else:
                 Molecule.from_smiles(smiles, toolkit_registry=toolkit_wrapper)
+
+    def test_openeye_from_smiles_radical(self):
+        """Test that parsing an SMILES with a radical raises RadicalsNotSupportedError."""
+        with pytest.raises(RadicalsNotSupportedError):
+            OpenEyeToolkitWrapper().from_smiles("[CH3]")
+
+    def test_openeye_from_smiles_transition_metal_radical(self):
+        """Test that parsing an SMILES with a transition metal radical works."""
+        OpenEyeToolkitWrapper().from_smiles("[Zn+2]")
 
     # TODO: test_smiles_round_trip
 
@@ -658,6 +666,27 @@ class TestOpenEyeToolkitWrapper:
         Molecule.from_openeye(oe_molecule)
         assert oechem.OEHasImplicitHydrogens(oe_molecule)
 
+    def test_from_openeye_radical(self):
+        """Test that parsing an oemol with a radical raises RadicalsNotSupportedError."""
+        from openeye import oechem
+
+        smiles = "[H][C]([H])[H]"
+        oemol = oechem.OEGraphMol()
+        oechem.OESmilesToMol(oemol, smiles)
+
+        with pytest.raises(RadicalsNotSupportedError):
+            OpenEyeToolkitWrapper().from_openeye(oemol)
+
+    def test_from_openeye_transition_metal_radical(self):
+        """Test that parsing an oemol with a transition metal radical works."""
+        from openeye import oechem
+
+        smiles = "[Zn+2]"
+        oemol = oechem.OEGraphMol()
+        oechem.OESmilesToMol(oemol, smiles)
+
+        OpenEyeToolkitWrapper().from_openeye(oemol)
+
     def test_from_openeye_implicit_hydrogen(self):
         """
         Test OpenEyeToolkitWrapper for loading a molecule with implicit
@@ -753,10 +782,23 @@ class TestOpenEyeToolkitWrapper:
         with pytest.raises(RuntimeError):
             Molecule.from_inchi(inchi, toolkit_registry=toolkit)
 
-    @pytest.mark.parametrize("molecule", get_mini_drug_bank(OpenEyeToolkitWrapper))
+    @pytest.mark.parametrize(
+        "molecule",
+        get_mini_drug_bank(
+            OpenEyeToolkitWrapper,
+            xfail_mols={
+                "DrugBank_3046": "Molecule is corrupted and is interpreted as a radical",
+                "DrugBank_3655": "Molecule is corrupted and is interpreted as a radical",
+                "DrugBank_1594": "Molecule is corrupted and is interpreted as a radical",
+                "DrugBank_4346": "Molecule is corrupted and is interpreted as a radical",
+                "DrugBank_6947": "Molecule is corrupted and is interpreted as a radical",
+            },
+        ),
+    )
     def test_non_standard_inchi_round_trip(self, molecule):
         """Test if a molecule can survive an InChi round trip test in some cases the standard InChI
-        will not enough to ensure information is preserved so we test the non-standard inchi here."""
+        will not enough to ensure information is preserved so we test the non-standard inchi here.
+        """
 
         from openff.toolkit.utils.toolkits import UndefinedStereochemistryError
 
@@ -1741,7 +1783,6 @@ class TestOpenEyeToolkitWrapper:
             use_conformers=molecule2.conformers,
         )
         for i in molecule2.bonds:
-
             if i.is_aromatic:
                 # Checking aromatic bonds
                 assert 1.05 < i.fractional_bond_order < 1.65
@@ -2002,6 +2043,15 @@ class TestRDKitToolkitWrapper:
         smiles2 = molecule.to_smiles(toolkit_registry=toolkit_wrapper)
         assert smiles2 == expected_output_smiles
 
+    def test_rdkit_from_smiles_radical(self):
+        """Test that parsing an SMILES with a radical raises RadicalsNotSupportedError."""
+        with pytest.raises(RadicalsNotSupportedError):
+            RDKitToolkitWrapper().from_smiles("[CH3]")
+
+    def test_rdkit_from_smiles_transition_metal_radical(self):
+        """Test that parsing an SMILES with a transition metal radical works."""
+        RDKitToolkitWrapper().from_smiles("[Zn+2]")
+
     def test_rdkit_from_smiles_hydrogens_are_explicit(self):
         """
         Test to ensure that RDKitToolkitWrapper.from_smiles has the proper behavior with
@@ -2120,7 +2170,8 @@ class TestRDKitToolkitWrapper:
     @pytest.mark.parametrize("molecule", get_mini_drug_bank(RDKitToolkitWrapper))
     def test_non_standard_inchi_round_trip(self, molecule):
         """Test if a molecule can survive an InChi round trip test in some cases the standard InChI
-        will not be enough to ensure information is preserved so we test the non-standard inchi here."""
+        will not be enough to ensure information is preserved so we test the non-standard inchi here.
+        """
 
         from openff.toolkit.utils.toolkits import UndefinedStereochemistryError
 
@@ -2321,7 +2372,6 @@ class TestRDKitToolkitWrapper:
 
             # Check RDMol
             for orig_atom, rd_atom in zip(molecule.atoms, rdmol.GetAtoms()):
-
                 atom_has_any_metadata = (
                     ("residue_name" in orig_atom.metadata)
                     or ("residue_number" in orig_atom.metadata)
@@ -2424,6 +2474,23 @@ class TestRDKitToolkitWrapper:
         offmol_no_h = Molecule.from_rdkit(rdmol, hydrogens_are_explicit=True)
         assert not any([a.atomic_number == 1 for a in offmol_no_h.atoms])
 
+    def test_from_rdkit_radical(self):
+        """Test that parsing an rdmol with a radical raises RadicalsNotSupportedError."""
+        from rdkit import Chem
+
+        rdmol = Chem.MolFromSmiles("[CH3]")
+
+        with pytest.raises(RadicalsNotSupportedError):
+            RDKitToolkitWrapper().from_rdkit(rdmol)
+
+    def test_from_rdkit_transition_metal_radical(self):
+        """Test that parsing an rdmol with a transition metal radical works."""
+        from rdkit import Chem
+
+        rdmol = Chem.MolFromSmiles("[Zn+2]")
+
+        RDKitToolkitWrapper().from_rdkit(rdmol)
+
     @pytest.mark.parametrize(
         "smiles, expected_map", [("[Cl:1][Cl]", {0: 1}), ("[Cl:1][Cl:2]", {0: 1, 1: 2})]
     )
@@ -2472,7 +2539,7 @@ class TestRDKitToolkitWrapper:
         assert len(molecule.conformers) == 1
         assert molecule.conformers[0].shape == (15, 3)
         assert_almost_equal(
-            molecule.conformers[0][5][1].m_as(unit.angstrom), 2.0104, decimal=4
+            molecule.conformers[0][5][1].m_as(unit.angstrom), 22.9800, decimal=4
         )
 
     def test_read_sdf_charges(self):
@@ -2741,7 +2808,7 @@ class TestRDKitToolkitWrapper:
             toolkit_registry=RDKitToolkitWrapper(),
         )
 
-    @pytest.mark.parametrize("partial_charge_method", ["mmff94"])
+    @pytest.mark.parametrize("partial_charge_method", ["mmff94", "gasteiger"])
     def test_assign_partial_charges_neutral(self, partial_charge_method):
         """Test RDKitToolkitWrapper assign_partial_charges()"""
 
@@ -2758,7 +2825,7 @@ class TestRDKitToolkitWrapper:
         charge_sum = np.sum(molecule.partial_charges)
         assert 1.0e-10 > abs(charge_sum.m_as(unit.elementary_charge))
 
-    @pytest.mark.parametrize("partial_charge_method", ["mmff94"])
+    @pytest.mark.parametrize("partial_charge_method", ["mmff94", "gasteiger"])
     def test_assign_partial_charges_net_charge(self, partial_charge_method):
         """
         Test RDKitToolkitWrapper assign_partial_charges() on a molecule with net charge.
@@ -2818,7 +2885,6 @@ class TestRDKitToolkitWrapper:
     def test_elf_prune_problematic_conformers_acid(
         self, formic_acid_molecule, formic_acid_conformers
     ):
-
         formic_acid_molecule._conformers = [*formic_acid_conformers.values()]
 
         pruned_conformers = RDKitToolkitWrapper._elf_prune_problematic_conformers(
@@ -3195,7 +3261,7 @@ class TestRDKitToolkitWrapper:
         rdmol = mol.to_rdkit()
 
         # now make sure the aromaticity matches for each atom
-        for (offatom, rdatom) in zip(mol.atoms, rdmol.GetAtoms()):
+        for offatom, rdatom in zip(mol.atoms, rdmol.GetAtoms()):
             assert offatom.is_aromatic is rdatom.GetIsAromatic()
 
     @pytest.mark.slow
@@ -3450,20 +3516,22 @@ class TestAmberToolsToolkitWrapper:
             )
 
     @pytest.mark.parametrize(
-        "partial_charge_method,expected_n_confs",
-        [("am1bcc", 1), ("am1-mulliken", 1), ("gasteiger", 0)],
+        "partial_charge_method, expected_n_confs, toolkit_wrappers",
+        [
+            ("am1bcc", 1, [AmberToolsToolkitWrapper, RDKitToolkitWrapper]),
+            ("am1-mulliken", 1, [AmberToolsToolkitWrapper, RDKitToolkitWrapper]),
+            ("gasteiger", 0, [AmberToolsToolkitWrapper]),
+        ],
     )
     def test_assign_partial_charges_wrong_n_confs(
-        self, partial_charge_method, expected_n_confs
+        self, partial_charge_method, expected_n_confs, toolkit_wrappers
     ):
         """
         Test AmberToolsToolkitWrapper assign_partial_charges() when requesting to use an incorrect number of
         conformers
         """
 
-        toolkit_registry = ToolkitRegistry(
-            toolkit_precedence=[AmberToolsToolkitWrapper, RDKitToolkitWrapper]
-        )
+        toolkit_registry = ToolkitRegistry(toolkit_precedence=toolkit_wrappers)
         molecule = create_ethanol()
         molecule.generate_conformers(n_conformers=2, rms_cutoff=0.01 * unit.angstrom)
 
@@ -3699,7 +3767,7 @@ class TestAmberToolsToolkitWrapper:
         without_oe = [b.fractional_bond_order for b in mol.bonds]
         GLOBAL_TOOLKIT_REGISTRY.register_toolkit(OpenEyeToolkitWrapper)
 
-        assert with_oe == without_oe
+        assert with_oe == pytest.approx(without_oe, abs=1e-5)
 
 
 class TestBuiltInToolkitWrapper:

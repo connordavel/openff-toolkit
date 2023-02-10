@@ -28,7 +28,7 @@ jobs:
       PACKAGE: openff-toolkit
 
     steps:
-      - uses: actions/checkout@v3.0.2
+      - uses: actions/checkout@v3
 
       - name: Vanilla install from conda
         uses: mamba-org/provision-with-micromamba@main
@@ -109,10 +109,7 @@ jobs:
         shell: bash -l {0}
         run: |
 
-          # Install test plugins
-          cd utilities/test_plugins
-          python setup.py develop --no-deps
-          cd -
+          python -m pip install utilities/test_plugins
 
           pwd
           ls

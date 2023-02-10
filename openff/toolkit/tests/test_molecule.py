@@ -16,6 +16,7 @@ import copy
 import os
 import pathlib
 import pickle
+import re
 from tempfile import NamedTemporaryFile
 
 import numpy as np
@@ -38,7 +39,6 @@ from openff.toolkit.tests.utils import (
     requires_pkg,
     requires_rdkit,
 )
-from openff.toolkit.topology import NotBondedError
 from openff.toolkit.topology.molecule import (
     Atom,
     FrozenMolecule,
@@ -54,8 +54,12 @@ from openff.toolkit.utils import get_data_file_path
 from openff.toolkit.utils.exceptions import (
     ConformerGenerationError,
     IncompatibleUnitError,
+    InvalidBondOrderError,
     InvalidConformerError,
+    MissingPartialChargesError,
     MultipleMoleculesInPDBError,
+    NotBondedError,
+    RemapIndexError,
     UnassignedChemistryInPDBError,
     UnsupportedFileTypeError,
 )
@@ -285,6 +289,19 @@ class TestAtom:
         atom1 = Atom(6, 1 * unit.elementary_charge, False)
         assert atom1.formal_charge == 1 * unit.elementary_charge
 
+    def test_init_invalid_atoms(self):
+        with pytest.raises(ValueError, match="must be int"):
+            Atom(0.5, 0, False)
+
+        with pytest.raises(ValueError, match="must be int"):
+            Atom(1 / 2, 0, False)
+
+        with pytest.raises(ValueError, match="must be positive"):
+            Atom(0, 0, False)
+
+        with pytest.raises(ValueError, match="must be positive"):
+            Atom(-1, 0, False)
+
     @pytest.mark.parametrize("atomic_number", range(1, 117))
     def test_atom_properties(self, atomic_number):
         """Test that atom properties are correctly populated and gettable"""
@@ -353,6 +370,65 @@ class TestAtom:
         atom.molecule = mol
         with pytest.raises(AssertionError, match="already has an associated molecule"):
             atom.molecule = mol
+
+    @pytest.fixture()
+    def water_without_charges(self):
+        return Molecule.from_mapped_smiles("[H:2][O:1][H:3]")
+
+    @pytest.fixture()
+    def water(self, water_without_charges):
+        water_without_charges.assign_partial_charges("formal_charge")
+        water = water_without_charges
+        return water
+
+    def test_set_partial_charge(self, water):
+        water.atoms[0].partial_charge = 12.0 * unit.elementary_charge
+        water.atoms[1].partial_charge = -4.0
+        water.atoms[2].partial_charge = -8.0
+
+        assert np.allclose(
+            water.partial_charges,
+            unit.Quantity([12, -4, -8], unit.elementary_charge),
+        )
+
+        assert np.allclose(
+            [atom.partial_charge.m for atom in water.atoms],
+            [12, -4, -8],
+        )
+
+    def test_set_partial_charges_no_charges(self, water_without_charges):
+        with pytest.raises(
+            MissingPartialChargesError, match="in a molecule with no partial charges."
+        ):
+            water_without_charges.atoms[2].partial_charge = 0.0 * unit.elementary_charge
+
+    def test_set_partial_charges_int(self, water):
+        with pytest.raises(ValueError, match="Cannot set.*'int'"):
+            water.atoms[2].partial_charge = 4
+
+    def test_set_partial_charges_openmm_quantity(self, water):
+        import openmm.unit
+
+        with pytest.raises(ValueError, match="Cannot set.*openmm.unit"):
+            water.atoms[2].partial_charge = 0.0 * openmm.unit.elementary_charge
+
+    def test_set_partial_charges_array(self, water):
+        with pytest.raises(ValueError, match="unit-wrapped.*numpy.ndarray"):
+            water.atoms[2].partial_charge = unit.Quantity(
+                [0.0, 0.0], unit.elementary_charge
+            )
+
+    def test_set_partial_charges_bogus(self, water):
+        with pytest.raises(ValueError, match="Cannot set.*class 'str'"):
+            water.atoms[2].partial_charge = "the right charge"
+
+
+class TestBond:
+    def test_float_bond_order(self):
+        molecule = create_ethanol()
+
+        with pytest.raises(InvalidBondOrderError):
+            molecule.bond(0).bond_order = 1.2
 
 
 class TestMolecule:
@@ -623,7 +699,6 @@ class TestMolecule:
                     )
 
             else:
-
                 # make the smiles then do some checks on it
                 output_smiles = mol.to_smiles(
                     isomeric=isomeric,
@@ -755,7 +830,6 @@ class TestMolecule:
     )
     @pytest.mark.parametrize("data", mapped_types)
     def test_partial_mapped_smiles(self, toolkit_class, data):
-
         if toolkit_class.is_available():
             toolkit = toolkit_class()
             mol = create_cis_1_2_dichloroethene()
@@ -868,7 +942,6 @@ class TestMolecule:
 
     # TODO: Should there be an equivalent toolkit test and leave this as an integration test?
     @requires_openeye
-    @pytest.mark.slow
     def test_create_from_file(self):
         """Test standard constructor taking a filename or file-like object."""
         # TODO: Expand test to both openeye and rdkit toolkits
@@ -891,8 +964,12 @@ class TestMolecule:
 
         # Ensure that attempting to initialize a single Molecule from a file
         # containing multiple molecules raises a ValueError
-        filename = get_data_file_path("molecules/zinc-subset-tripos.mol2.gz")
-        with pytest.raises(ValueError):
+        filename = get_data_file_path("molecules/butane_multi.sdf")
+
+        with pytest.raises(
+            ValueError,
+            match="Specified file or file-like.*exactly one molecule",
+        ):
             Molecule(filename, allow_undefined_stereo=True)
 
     def test_from_pathlib_path(self):
@@ -920,7 +997,27 @@ class TestMolecule:
     @pytest.mark.parametrize("molecule", mini_drug_bank())
     def test_to_networkx(self, molecule):
         """Test conversion to NetworkX graph."""
-        molecule.to_networkx()
+        graph = molecule.to_networkx()
+
+        assert graph.number_of_nodes() == molecule.n_atoms
+        assert graph.number_of_edges() == molecule.n_bonds
+
+        for bond in molecule.bonds:
+            edge = graph.get_edge_data(bond.atom1_index, bond.atom2_index)
+
+            for attr in ["stereochemistry", "bond_order", "is_aromatic"]:
+                assert edge[attr] == getattr(bond, attr)
+
+        for node_index, node in graph.nodes(data=True):
+            atom = molecule.atom(node_index)
+
+            for attr in [
+                "atomic_number",
+                "is_aromatic",
+                "stereochemistry",
+                "formal_charge",
+            ]:
+                assert node[attr] == getattr(atom, attr)
 
     @requires_rdkit
     @pytest.mark.parametrize("molecule", mini_drug_bank())
@@ -1097,8 +1194,8 @@ class TestMolecule:
                 assert data.count("C7H8\n") == 1
                 # now check that we can find the first and last coords
                 coords = [
-                    "C        0.0000000000    0.0000000000    0.0000000000\n",
-                    "H       -0.0000000000    3.7604000568    0.0000000000\n",
+                    "C        22.3700008392    21.6800003052    29.7700004578\n",
+                    "H        26.7900009155    23.1900005341    28.7199993134\n",
                 ]
                 for coord in coords:
                     assert coord in data
@@ -1185,8 +1282,8 @@ class TestMolecule:
                 assert data.count("C7H8\n") == 1
                 # now check that we can find the first and last coords
                 coords = [
-                    "C        0.0000000000    0.0000000000    0.0000000000\n",
-                    "H       -0.0000000000    3.7604000000    0.0000000000\n",
+                    "C        22.3700000000    21.6800000000    29.7700000000\n",
+                    "H        26.7900000000    23.1900000000    28.7200000000\n",
                 ]
                 for coord in coords:
                     assert coord in data
@@ -1584,18 +1681,10 @@ class TestMolecule:
             "CCC[N@@](C)CC"
         )
 
-    def test_remap(self):
-        """Test the remap function which should return a new molecule in the requested ordering"""
-        # the order here is CCO
-        ethanol = create_ethanol()
-        # get ethanol in reverse order OCC
-        ethanol_reverse = create_reversed_ethanol()
-        # get the mapping between the molecules
-        mapping = Molecule.are_isomorphic(ethanol, ethanol_reverse, True)[1]
+    class TestRemap:
+        """Tests for the ``Molecule.remap()`` method"""
 
-        new_ethanol = ethanol.remap(mapping, current_to_new=True)
-
-        def assert_molecules_match_after_remap(mol1, mol2):
+        def assert_molecules_match_after_remap(self, mol1, mol2):
             """Check all of the attributes in a molecule match after being remapped"""
             for atoms in zip(mol1.atoms, mol2.atoms):
                 assert atoms[0].to_dict() == atoms[1].to_dict()
@@ -1623,18 +1712,225 @@ class TestMolecule:
             assert mol1.total_charge == mol2.total_charge
             assert mol1.partial_charges.all() == mol2.partial_charges.all()
 
-        # check all of the properties match as well, torsions and impropers will be in a different order
-        # due to the bonds being out of order
-        assert_molecules_match_after_remap(new_ethanol, ethanol_reverse)
+        def test_remap(self):
+            """Test the remap function which should return a new molecule in the requested ordering"""
+            # the order here is CCO
+            ethanol = create_ethanol()
+            # get ethanol in reverse order OCC
+            ethanol_reverse = create_reversed_ethanol()
+            # get the mapping between the molecules
+            mapping = Molecule.are_isomorphic(ethanol, ethanol_reverse, True)[1]
 
-        # test round trip (double remapping a molecule)
-        new_ethanol = ethanol.remap(mapping, current_to_new=True)
-        isomorphic, round_trip_mapping = Molecule.are_isomorphic(
-            new_ethanol, ethanol, return_atom_map=True
+            new_ethanol = ethanol.remap(mapping, current_to_new=True)
+
+            # check all of the properties match as well, torsions and impropers will be in a different order
+            # due to the bonds being out of order
+            self.assert_molecules_match_after_remap(new_ethanol, ethanol_reverse)
+
+            # test round trip (double remapping a molecule)
+            new_ethanol = ethanol.remap(mapping, current_to_new=True)
+            isomorphic, round_trip_mapping = Molecule.are_isomorphic(
+                new_ethanol, ethanol, return_atom_map=True
+            )
+            assert isomorphic is True
+            round_trip_ethanol = new_ethanol.remap(
+                round_trip_mapping, current_to_new=True
+            )
+            self.assert_molecules_match_after_remap(round_trip_ethanol, ethanol)
+
+        @pytest.mark.parametrize("current_to_new", [True, False])
+        @pytest.mark.parametrize("partial", [True, False])
+        def test_remap_fails_with_duplicate_indices(
+            self,
+            current_to_new,
+            partial,
+        ):
+            ethanol = create_ethanol()
+            # get a mapping with duplicate atoms
+            mapping = {i: i for i in range(ethanol.n_atoms)}
+            # Make the first and second maps duplicates
+            mapping[1] = mapping[0]
+
+            with pytest.raises(
+                RemapIndexError,
+                match="There must be no duplicate source or destination indices",
+            ):
+                ethanol.remap(
+                    mapping,
+                    current_to_new=current_to_new,
+                    partial=partial,
+                )
+
+        @pytest.mark.parametrize(
+            "mapping",
+            [
+                {10: 2, 11: 1, 12: 0, 13: 6, 14: 7, 15: 8, 16: 4, 17: 5, 18: 3},
+                {0: 2, 1: 1, 2: 0, 3: 6, 4: 7, 5: 8, 6: 4, 7: 5, 8: 999999},
+                {0: 2, 1: 1, 2: 0, 3: 6, 4: "not an integer", 5: 8, 6: 4, 7: 5, 8: 3},
+            ],
         )
-        assert isomorphic is True
-        round_trip_ethanol = new_ethanol.remap(round_trip_mapping, current_to_new=True)
-        assert_molecules_match_after_remap(round_trip_ethanol, ethanol)
+        @pytest.mark.parametrize("current_to_new", [True, False])
+        @pytest.mark.parametrize("partial", [True, False])
+        def test_remap_fails_with_out_of_range_indices(
+            self, mapping, current_to_new, partial
+        ):
+            """Make sure the remap fails when indices are out of range
+
+            This tests current_to_new in both directions and ensures the
+            same behavior with partial maps (as all total maps should work in
+            partial mode).
+            """
+            ethanol = Molecule.from_file(get_data_file_path("molecules/ethanol.sdf"))
+            mapping = {0: 2, 1: 1, 2: 0, 3: 6, 4: 7, 5: 8, 6: 4, 7: 5, 8: 3}
+            wrong_index_mapping = dict(
+                (i + 10, new_id) for i, new_id in enumerate(mapping.values())
+            )
+            with pytest.raises(
+                RemapIndexError,
+                match=re.escape(
+                    "All indices in a mapping_dict for a molecule with 9 atoms"
+                    + " must be integers between 0 and 8"
+                ),
+            ):
+                ethanol.remap(
+                    wrong_index_mapping, current_to_new=current_to_new, partial=partial
+                )
+
+        def test_remap_fails_with_missing_indices(self):
+            ethanol = create_ethanol()
+            # get a mapping with duplicate atoms
+            mapping = {i: i for i in range(ethanol.n_atoms)}
+            # Remove one of the mappings
+            del mapping[0]
+
+            with pytest.raises(
+                RemapIndexError,
+                match=re.escape(
+                    f"The number of mapping indices ({len(mapping)}) does not "
+                    + f"match the number of atoms in this molecule ({ethanol.n_atoms})"
+                ),
+            ):
+                ethanol.remap(mapping, current_to_new=True)
+
+        def test_remap_updates_atom_map(self):
+            # get ethanol and a reverse mapping
+            ethanol = create_ethanol()
+            ethanol_reverse = create_reversed_ethanol()
+            mapping = Molecule.are_isomorphic(ethanol, ethanol_reverse, True)[1]
+            # Set up an atom_map to update
+            ethanol.properties["atom_map"] = {
+                0: 1,  # Check uncomplicated entries are remapped
+                1: "foo",  # Check non-integer values are remapped
+                2: 2,  # Check duplicate values are remapped
+                3: 2,
+                "hello": 3,  # Check non-integer keys are preserved
+                1000: 1000,  # Check out-of-range keys are preserved
+            }
+            # Name all atoms so we can tell them apart later
+            for atom, name in zip(ethanol.atoms, range(ethanol.n_atoms)):
+                atom.name = "atom_" + str(name)
+            # Run the remap
+            new_ethanol = ethanol.remap(mapping, current_to_new=True)
+
+            def atom_name_or(default, molecule, index):
+                """Get the atom name at the given index, or the default"""
+                try:
+                    return molecule.atom(index).name
+                except (TypeError, IndexError):
+                    return default
+                assert False, "Unreachable"
+
+            # Check the updated atom map
+            expected_atom_map_with_names = {
+                atom_name_or(k, ethanol, k): v
+                for k, v in ethanol.properties["atom_map"].items()
+            }
+            actual_atom_map_with_names = {
+                atom_name_or(k, new_ethanol, k): v
+                for k, v in new_ethanol.properties["atom_map"].items()
+            }
+            assert expected_atom_map_with_names == actual_atom_map_with_names
+
+        def test_remap_partial(self):
+            """Test the remap function which should return a new molecule in the requested ordering"""
+            # the order here is CCO
+            ethanol = create_ethanol()
+            # Create partial map to swap first two atoms
+            partial_map = {0: 1, 1: 0}
+            # Create equivalent total map
+            total_map = {0: 1, 1: 0, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8}
+
+            remapped_ethanol_partial = ethanol.remap(
+                partial_map,
+                current_to_new=True,
+                partial=True,
+            )
+            remapped_ethanol_total = ethanol.remap(
+                total_map,
+                current_to_new=True,
+                partial=False,
+            )
+
+            # check all of the properties match as well, torsions and impropers will be in a different order
+            # due to the bonds being out of order
+            self.assert_molecules_match_after_remap(
+                remapped_ethanol_partial,
+                remapped_ethanol_total,
+            )
+
+        @pytest.mark.parametrize(
+            "mapping",
+            [
+                {0: 0, 1: 0, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+                {0: 0, 1: 0},
+            ],
+        )
+        @pytest.mark.parametrize("current_to_new", [True, False])
+        def test_remap_partial_fails_with_duplicate_indices(
+            self,
+            mapping,
+            current_to_new,
+        ):
+            ethanol = create_ethanol()
+
+            with pytest.raises(
+                RemapIndexError,
+                match="There must be no duplicate source or destination indices",
+            ):
+                ethanol.remap(
+                    mapping,
+                    current_to_new=current_to_new,
+                    partial=True,
+                )
+
+        @pytest.mark.parametrize(
+            "mapping",
+            [
+                {10: 0, 11: 1, 12: 2, 13: 3, 14: 4, 15: 5, 16: 6},
+                {10: 2, 11: 1, 12: 0, 13: 6, 14: 7, 15: 8, 16: 4},
+                {0: 9999999},
+                {"not_an_integer": 0},
+            ],
+        )
+        @pytest.mark.parametrize("current_to_new", [True, False])
+        def test_remap_partial_fails_with_out_of_range_indices(
+            self, mapping, current_to_new
+        ):
+            """Make sure the remap fails when the indexing starts from the wrong value"""
+            ethanol = Molecule.from_file(get_data_file_path("molecules/ethanol.sdf"))
+
+            with pytest.raises(
+                RemapIndexError,
+                match=re.escape(
+                    "All indices in a mapping_dict for a molecule with 9 atoms"
+                    + " must be integers between 0 and 8"
+                ),
+            ):
+                ethanol.remap(
+                    mapping,
+                    current_to_new=current_to_new,
+                    partial=True,
+                )
 
     @requires_openeye
     def test_canonical_ordering_openeye(self):
@@ -1671,24 +1967,6 @@ class TestMolecule:
             True,
             {0: 2, 1: 0, 2: 1, 3: 8, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7},
         ) == Molecule.are_isomorphic(canonical_ethanol, ethanol, True)
-
-    def test_too_small_remap(self):
-        """Make sure remap fails if we do not supply enough indexes"""
-        ethanol = Molecule.from_file(get_data_file_path("molecules/ethanol.sdf"))
-        # catch mappings that are the wrong size
-        too_small_mapping = {0: 1}
-        with pytest.raises(ValueError):
-            ethanol.remap(too_small_mapping, current_to_new=True)
-
-    def test_wrong_index_mapping(self):
-        """Make sure the remap fails when the indexing starts from the wrong value"""
-        ethanol = Molecule.from_file(get_data_file_path("molecules/ethanol.sdf"))
-        mapping = {0: 2, 1: 1, 2: 0, 3: 6, 4: 7, 5: 8, 6: 4, 7: 5, 8: 3}
-        wrong_index_mapping = dict(
-            (i + 10, new_id) for i, new_id in enumerate(mapping.values())
-        )
-        with pytest.raises(IndexError):
-            ethanol.remap(wrong_index_mapping, current_to_new=True)
 
     tautomer_data = [
         {"molecule": "Oc1c(cccc3)c3nc2ccncc12", "tautomers": 2},
@@ -1987,40 +2265,195 @@ class TestMolecule:
             Molecule.from_file("foo.xyz", file_format="xyz")
 
     @requires_rdkit
-    def test_from_pdb_and_smiles(self):
-        """Test the ability to make a valid molecule using RDKit and SMILES together"""
-        # try and make a molecule from a pdb and smiles that don't match
-        with pytest.raises(InvalidConformerError):
-            mol = Molecule.from_pdb_and_smiles(
-                get_data_file_path("molecules/toluene.pdb"), "CC"
+    @pytest.mark.parametrize(
+        "pdb_path,smiles,sdf_path",
+        [
+            (
+                "proteins/MainChain_ALA_ALA.pdb",
+                "C[C@@H](C(=O)N[C@@H](C)C(=O)NC)NC(=O)C",
+                "proteins/MainChain_ALA_ALA.sdf",
+            ),
+            (
+                "molecules/toluene.pdb",
+                "CC1=CC=CC=C1",
+                "molecules/toluene.sdf",
+            ),
+        ],
+    )
+    class TestFromPDBAndSmiles:
+        """
+        Tests for the ``Molecule.from_pdb_and_smiles()`` method
+
+        Parametrized with different molecules to test on. Each molecule should
+        be a single-molecule PDB, the corresponding SMILES, and a matching SDF
+        with identical coordinates and atom ordering to the PDB.
+        """
+
+        def test_wrong_smiles_fails(self, pdb_path, smiles, sdf_path):
+            """Providing an incorrect SMILES should raise an ``InvalidConformerError``"""
+            pdb_path = get_data_file_path(pdb_path)
+
+            # Guarantee wrong_smiles is wrong, even if more parameter options
+            # are added in future
+            wrong_smiles = "CC"
+            if Molecule.from_smiles(wrong_smiles).is_isomorphic_with(
+                Molecule.from_smiles(smiles)
+            ):
+                wrong_smiles = "CCC"
+
+            # Run the test
+            with pytest.raises(InvalidConformerError):
+                Molecule.from_pdb_and_smiles(pdb_path, wrong_smiles)
+
+        @requires_pkg("mdtraj")
+        def test_atom_order_matches_pdb(self, pdb_path, smiles, sdf_path):
+            """The produced Molecule's atom order should match the PDB
+
+            This test uses MDTraj as an alternative PDB parser to check atom
+            ordering. However, it can only check that the elements and atom
+            names are correct, not connectivity."""
+            import mdtraj
+
+            pdb_path = get_data_file_path(pdb_path)
+            mol = Molecule.from_pdb_and_smiles(pdb_path, smiles)
+
+            pdb_mdtraj = mdtraj.load_pdb(pdb_path, standard_names=False)
+
+            assert pdb_mdtraj.n_atoms == mol.n_atoms
+            for mdtraj_atom, off_atom in zip(pdb_mdtraj.topology.atoms, mol.atoms):
+                assert mdtraj_atom.element.number == off_atom.atomic_number
+                assert mdtraj_atom.name == off_atom.name
+
+        @requires_pkg("mdtraj")
+        def test_conformers_match_pdb(self, pdb_path, smiles, sdf_path):
+            """The produced conformers should match the coordinates in the PDB
+
+            This test uses MDTraj as an alternative PDB parser to check
+            coordinates."""
+            import mdtraj
+
+            pdb_path = get_data_file_path(pdb_path)
+            mol = Molecule.from_pdb_and_smiles(pdb_path, smiles)
+
+            pdb_mdtraj = mdtraj.load_pdb(pdb_path)
+
+            mdtraj_coordinates = pdb_mdtraj.xyz
+            pdb_coordinates = np.asarray(
+                [conformer.m_as(unit.nanometer) for conformer in mol.conformers]
             )
 
-        # make a molecule from the toluene pdb file and the correct smiles
-        mol = Molecule.from_pdb_and_smiles(
-            get_data_file_path("molecules/toluene.pdb"), "Cc1ccccc1"
-        )
+            assert np.all(np.abs(mdtraj_coordinates - pdb_coordinates) < 1e-3)
 
-        # make toluene from the sdf file
-        mol_sdf = Molecule.from_file(get_data_file_path("molecules/toluene.sdf"))
-        # get the mapping between them and compare the properties
-        isomorphic, atom_map = Molecule.are_isomorphic(
-            mol, mol_sdf, return_atom_map=True
-        )
-        assert isomorphic is True
-        for pdb_atom, sdf_atom in atom_map.items():
-            assert mol.atoms[pdb_atom].to_dict() == mol_sdf.atoms[sdf_atom].to_dict()
-        # check bonds match, however there order might not
-        sdf_bonds = dict(
-            ((bond.atom1_index, bond.atom2_index), bond) for bond in mol_sdf.bonds
-        )
-        for bond in mol.bonds:
-            key = (atom_map[bond.atom1_index], atom_map[bond.atom2_index])
-            if key not in sdf_bonds:
-                key = tuple(reversed(key))
-            assert key in sdf_bonds
-            # now compare the attributes
-            assert bond.is_aromatic == sdf_bonds[key].is_aromatic
-            assert bond.stereochemistry == sdf_bonds[key].stereochemistry
+        @requires_pkg("openmm")
+        def test_metadata_matches_pdb(self, pdb_path, smiles, sdf_path):
+            """The produced conformers should match the coordinates in the PDB
+
+            This test uses OpenMM as an alternative PDB parser to check
+            metadata."""
+            from openmm.app import PDBFile
+
+            pdb_path = get_data_file_path(pdb_path)
+            mol = Molecule.from_pdb_and_smiles(pdb_path, smiles)
+
+            pdb_omm = PDBFile(pdb_path)
+
+            for omm_atom, off_atom in zip(pdb_omm.getTopology().atoms(), mol.atoms):
+                omm_metadata = {
+                    "residue_name": omm_atom.residue.name,
+                    "residue_number": int(omm_atom.residue.id),
+                    "insertion_code": omm_atom.residue.insertionCode,
+                    "chain_id": omm_atom.residue.chain.id,
+                }
+                assert omm_metadata == off_atom.metadata
+
+        @requires_rdkit
+        def test_connectivity_matches_pdb(self, pdb_path, smiles, sdf_path):
+            """
+            The produced Molecule's connectivity should match RDKit's interpretation
+
+            This test is essential to check for jumbling of atom orders that do
+            not alter element order. RDKit is used as a PDB parser to minimise
+            differences in bond perception between parsers.
+            """
+            pdb_path = get_data_file_path(pdb_path)
+            mol = Molecule.from_pdb_and_smiles(pdb_path, smiles)
+            from rdkit import Chem
+
+            rdkit_mol = Molecule.from_rdkit(
+                Chem.MolFromPDBFile(pdb_path, removeHs=False),
+                allow_undefined_stereo=True,
+                hydrogens_are_explicit=True,
+            )
+
+            expected_connectivity = sorted(
+                sorted([bond.atom1_index, bond.atom2_index]) for bond in rdkit_mol.bonds
+            )
+            actual_connectivity = sorted(
+                sorted([bond.atom1_index, bond.atom2_index]) for bond in mol.bonds
+            )
+
+            assert expected_connectivity == actual_connectivity
+
+        def test_is_isomorphic_to_smiles(self, pdb_path, smiles, sdf_path):
+            """The produced Molecule should be isomorphic to the SMILES string"""
+            pdb_path = get_data_file_path(pdb_path)
+            pdb_mol = Molecule.from_pdb_and_smiles(pdb_path, smiles)
+
+            smiles_mol = Molecule.from_smiles(smiles)
+
+            assert pdb_mol.is_isomorphic_with(smiles_mol)
+
+        def test_matches_sdf(self, pdb_path, smiles, sdf_path):
+            """The produced Molecule should exactly match the corresponding SDF
+
+            This test is designed to catch anything missed by the above
+            property tests."""
+            pdb_path = get_data_file_path(pdb_path)
+            pdb_mol = Molecule.from_pdb_and_smiles(pdb_path, smiles)
+
+            sdf_path = get_data_file_path(sdf_path)
+            sdf_mol = Molecule.from_file(sdf_path)
+
+            # Check that the SDF and PDB are isomorphic with identical atom ordering
+            isomorphic, atom_map = Molecule.are_isomorphic(
+                pdb_mol, sdf_mol, return_atom_map=True
+            )
+            assert isomorphic, "SDF and PDB must be the same molecule"
+            assert atom_map == {
+                i: i for i in range(pdb_mol.n_atoms)
+            }, "SDF and PDB must have same atom ordering"
+
+            # Check that the coordinates are identical
+            assert np.all(
+                np.abs(np.asarray(sdf_mol.conformers) - np.asarray(pdb_mol.conformers))
+                < 1e-4
+            ), "SDF and PDB must have identical conformers"
+
+            # Not sure that the following are necessary given are_isomorphic,
+            # but keeping them from previous test implementations
+
+            # Check that the atom properties are identical (except metadata)
+            for pdb_atom, sdf_atom in zip(pdb_mol.atoms, sdf_mol.atoms):
+                pdb_atom_dict = pdb_atom.to_dict()
+                del pdb_atom_dict["metadata"]
+                del pdb_atom_dict["name"]
+
+                sdf_atom_dict = sdf_atom.to_dict()
+                del sdf_atom_dict["metadata"]
+                del sdf_atom_dict["name"]
+                assert sdf_atom_dict == pdb_atom_dict
+
+            # Check that the bonds match, though possibly in a different order
+            sdf_bonds = {
+                tuple(sorted([bond.atom1_index, bond.atom2_index])): bond
+                for bond in sdf_mol.bonds
+            }
+
+            for pdb_bond in pdb_mol.bonds:
+                key = tuple(sorted([pdb_bond.atom1_index, pdb_bond.atom2_index]))
+                assert key in sdf_bonds
+                assert pdb_bond.is_aromatic == sdf_bonds[key].is_aromatic
+                assert pdb_bond.stereochemistry == sdf_bonds[key].stereochemistry
 
     @requires_pkg("qcportal")
     def test_to_qcschema(self):
@@ -2546,22 +2979,6 @@ class TestMolecule:
         molecule.add_conformer(conf2)
         assert molecule.n_conformers == 2
 
-        # Add conformers with too few coordinates
-        conf_missing_z = unit.Quantity(
-            np.array(
-                [
-                    [101.0, 102.0, 103.0],
-                    [104.0, 105.0, 106.0],
-                    [107.0, 108.0, 109.0],
-                    [110.0, 111.0, 112.0],
-                    [113.0, 114.0],
-                ]
-            ),
-            unit.angstrom,
-        )
-        with pytest.raises(InvalidConformerError):
-            molecule.add_conformer(conf_missing_z)
-
         conf_too_few_atoms = unit.Quantity(
             np.array(
                 [
@@ -2692,6 +3109,13 @@ class TestMolecule:
             )
 
         assert molecule == molecule_copy
+
+    def test_chemical_environment_old_arg(self):
+        from openff.toolkit.typing.chemistry import ChemicalEnvironment
+
+        molecule = create_ethanol()
+        with pytest.raises(ValueError, match="'query' must be a SMARTS"):
+            molecule.chemical_environment_matches(ChemicalEnvironment("[*:1]"))
 
     @requires_openeye
     def test_chemical_environment_matches_OE(self):
@@ -2837,6 +3261,7 @@ class TestMolecule:
             ("ambertools", "am1bcc"),
             ("ambertools", "gasteiger"),
             ("ambertools", "am1-mulliken"),
+            ("rdkit", "gasteiger"),
         ],
     )
     def test_assign_partial_charges(self, toolkit, method):
@@ -2850,14 +3275,13 @@ class TestMolecule:
         # Molecule API, and therefore a single molecule should be sufficient
         molecule = Molecule.from_smiles("CN1C=NC2=C1C(=O)N(C(=O)N2C)C")
 
-        if toolkit == "openeye":
-            toolkit_registry = ToolkitRegistry(
-                toolkit_precedence=[OpenEyeToolkitWrapper]
-            )
-        elif toolkit == "ambertools":
-            toolkit_registry = ToolkitRegistry(
-                toolkit_precedence=[AmberToolsToolkitWrapper]
-            )
+        _TOOLKITS = {
+            "openeye": OpenEyeToolkitWrapper,
+            "ambertools": AmberToolsToolkitWrapper,
+            "rdkit": RDKitToolkitWrapper,
+        }
+
+        toolkit_registry = ToolkitRegistry(toolkit_precedence=[_TOOLKITS[toolkit]])
 
         molecule.assign_partial_charges(
             partial_charge_method=method,
@@ -3108,20 +3532,39 @@ class TestMolecule:
                 n_conformers=1, toolkit_registry=RDKitToolkitWrapper()
             )
 
-    @requires_openeye
-    @requires_rdkit
-    def test_compute_partial_charges_am1bcc_warning(self):
-        # TODO: Remove in version 0.12.0 alognside the removal of these methods
-        molecule = create_ethanol()
+    def test_deepcopy_not_shallow(self):
+        """
+        Check that deep copies don't re-use any mutable data structures
 
-        toolkits = [OpenEyeToolkitWrapper(), AmberToolsToolkitWrapper()]
+        Mutable attributes set in ``Molecule._initialize_from_dict()`` and their
+        mutable values should be tested here. Other attributes are either not
+        copied by ``deepcopy``, or else are immutable, so copies may be the same
+        object (eg, ``deepcopy(None)``).
+        """
+        mol_source = create_ethanol()
+        mol_source.generate_conformers()
 
-        with pytest.warns(UserWarning, match="compute_.*_am1bcc.*0.12"):
-            molecule.compute_partial_charges_am1bcc()
+        mol_copy = copy.deepcopy(mol_source)
 
-        for toolkit in toolkits:
-            with pytest.warns(UserWarning, match="compute_.*_am1bcc.*0.12"):
-                toolkit.compute_partial_charges_am1bcc(molecule)
+        assert mol_source._conformers is not mol_copy._conformers
+        assert all(
+            a is not b for a, b in zip(mol_source._conformers, mol_copy._conformers)
+        )
+
+        assert mol_source._atoms is not mol_copy._atoms
+        assert all(a is not b for a, b in zip(mol_source._atoms, mol_copy._atoms))
+
+        assert mol_source._bonds is not mol_copy._bonds
+        assert all(a is not b for a, b in zip(mol_source._bonds, mol_copy._bonds))
+
+        assert mol_source._hierarchy_schemes is not mol_copy._hierarchy_schemes
+        assert all(
+            a is not b
+            for a, b in zip(mol_source._hierarchy_schemes, mol_copy._hierarchy_schemes)
+        )
+
+        assert mol_source._properties is not mol_copy._properties
+        assert mol_source._partial_charges is not mol_copy._partial_charges
 
 
 class TestMoleculeVisualization:
@@ -3350,6 +3793,19 @@ class TestMoleculeResiduePerception:
             if atom.metadata:
                 counter += 1
         assert counter == offmol.n_atoms
+
+    def test_perceive_residues_sorting(self, strict_chirality):
+        """Ensure residues are sorted consecutively when `Molecule.perceive_residues` is used. See issue #1461."""
+        molecule = Molecule.from_file(get_data_file_path("proteins/ace-a10-nme.sdf"))
+
+        molecule.perceive_residues(strict_chirality=strict_chirality)
+
+        for index, residue in enumerate(molecule.residues):
+            found = residue.residue_number
+            expected = str(index + 1)
+
+            assert isinstance(found, str)
+            assert found == expected
 
 
 class TestMoleculeFromPDB:
@@ -3598,6 +4054,21 @@ class TestMoleculeFromPDB:
             expected_mol, atom_stereochemistry_matching=False
         )
 
+    def test_molecule_from_pdb_neutral_arg_dipeptide(self):
+        offmol = Molecule.from_polymer_pdb(
+            get_data_file_path("proteins/neutral_arginine.pdb")
+        )
+        assert offmol.n_atoms == 26
+        assert offmol.total_charge == 0 * unit.elementary_charge
+        expected_mol = Molecule.from_smiles(
+            "[NH3+][C@H](CCCNC(N)(=N))C(=O)[O-]", allow_undefined_stereo=True
+        )
+        assert offmol.is_isomorphic_with(
+            expected_mol,
+            atom_stereochemistry_matching=False,
+            bond_stereochemistry_matching=False,
+        )
+
     def test_molecule_from_pdb_error_no_hydrogens(self):
         """Test that a PDB without hydrogens raises a descriptive error"""
         with pytest.raises(
@@ -3843,11 +4314,11 @@ class TestHierarchies:
         dipeptide_residues_perceived = create_dipeptide()
 
         assert "ACE" == dipeptide_residues_perceived.atoms[0].metadata["residue_name"]
-        assert 1 == dipeptide_residues_perceived.atoms[0].metadata["residue_number"]
+        assert "1" == dipeptide_residues_perceived.atoms[0].metadata["residue_number"]
         assert " " == dipeptide_residues_perceived.atoms[0].metadata["insertion_code"]
 
         assert "ALA" == dipeptide_residues_perceived.atoms[10].metadata["residue_name"]
-        assert 2 == dipeptide_residues_perceived.atoms[10].metadata["residue_number"]
+        assert "2" == dipeptide_residues_perceived.atoms[10].metadata["residue_number"]
         assert " " == dipeptide_residues_perceived.atoms[10].metadata["insertion_code"]
 
         assert isinstance(dipeptide_residues_perceived.residues[0], HierarchyElement)
@@ -3885,7 +4356,7 @@ class TestHierarchies:
         assert len(dipeptide_residues_perceived.hierarchy_schemes) == 3
 
         # update_hierarchy_schemes() was called by add_hierarchy_scheme
-        assert dipeptide_residues_perceived.res_by_num[0].residue_number == 1
+        assert dipeptide_residues_perceived.res_by_num[0].residue_number == "1"
         # Delete the hierarchyscheme and ensure that the iterators are no longer available
         dipeptide_residues_perceived.delete_hierarchy_scheme("res_by_num")
         assert len(dipeptide_residues_perceived.hierarchy_schemes) == 2
@@ -3981,24 +4452,24 @@ class TestHierarchies:
 
         assert (
             str(dipeptide_hierarchy_perceived.residues[0])
-            == "HierarchyElement ('None', 1, ' ', 'ACE') of iterator 'residues' containing 6 atom(s)"
+            == "HierarchyElement ('None', '1', ' ', 'ACE') of iterator 'residues' containing 6 atom(s)"
         )
         assert dipeptide_hierarchy_perceived.residues[0].chain_id == "None"
         assert dipeptide_hierarchy_perceived.residues[0].residue_name == "ACE"
         assert dipeptide_hierarchy_perceived.residues[0].insertion_code == " "
-        assert dipeptide_hierarchy_perceived.residues[0].residue_number == 1
+        assert dipeptide_hierarchy_perceived.residues[0].residue_number == "1"
         assert set(dipeptide_hierarchy_perceived.residues[0].atom_indices) == set(
             range(6)
         )
 
         assert (
             str(dipeptide_hierarchy_perceived.residues[1])
-            == "HierarchyElement ('None', 2, ' ', 'ALA') of iterator 'residues' containing 11 atom(s)"
+            == "HierarchyElement ('None', '2', ' ', 'ALA') of iterator 'residues' containing 11 atom(s)"
         )
         assert dipeptide_hierarchy_perceived.residues[1].chain_id == "None"
         assert dipeptide_hierarchy_perceived.residues[1].residue_name == "ALA"
         assert dipeptide_hierarchy_perceived.residues[1].insertion_code == " "
-        assert dipeptide_hierarchy_perceived.residues[1].residue_number == 2
+        assert dipeptide_hierarchy_perceived.residues[1].residue_number == "2"
         assert set(dipeptide_hierarchy_perceived.residues[1].atom_indices) == set(
             range(6, 17)
         )
@@ -4019,10 +4490,10 @@ class TestHierarchies:
 
         for atom in dipeptide_hierarchy_perceived.atoms:
             atom.metadata["chain_id"] = "A"
-        assert ("A", 1, " ", "ACE") != dipeptide_hierarchy_perceived.residues[
+        assert ("A", "1", " ", "ACE") != dipeptide_hierarchy_perceived.residues[
             0
         ].identifier
         dipeptide_hierarchy_perceived.update_hierarchy_schemes()
-        assert ("A", 1, " ", "ACE") == dipeptide_hierarchy_perceived.residues[
+        assert ("A", "1", " ", "ACE") == dipeptide_hierarchy_perceived.residues[
             0
         ].identifier

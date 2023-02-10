@@ -36,7 +36,6 @@ from openff.toolkit.typing.engines.smirnoff.parameters import (
     _ParameterAttributeHandler,
     vdWHandler,
 )
-from openff.toolkit.utils import detach_units
 from openff.toolkit.utils.collections import ValidatedList
 from openff.toolkit.utils.exceptions import (
     DuplicateParameterError,
@@ -451,7 +450,6 @@ class TestParameterAttributeHandler:
 
 
 class TestParameterHandler:
-
     length = 1 * unit.angstrom
     k = 10 * unit.kilocalorie / unit.mole / unit.angstrom**2
 
@@ -1190,18 +1188,11 @@ class TestBondType:
             k=5 * unit.kilocalorie / unit.mole / unit.angstrom**2,
         )
         param_dict = p1.to_dict()
-        param_dict_unitless, attached_units = detach_units(param_dict)
 
-        assert param_dict_unitless == {
+        assert param_dict == {
             "smirks": "[*:1]-[*:2]",
-            "length": 1.02,
-            "k": 5,
-        }
-        assert attached_units == {
-            "length_unit": unit.angstrom,
-            "k_unit": (unit.angstrom**-2)
-            * (unit.mole**-1)
-            * (unit.kilocalorie**1),
+            "length": unit.Quantity(1.02, unit.angstrom),
+            "k": unit.Quantity(5, unit.kilocalorie_per_mole / unit.angstrom**2),
         }
 
     def test_bondtype_partial_bondorders(self):
@@ -1275,30 +1266,10 @@ class TestBondType:
             length=1.02 * unit.angstrom,
             k=5 * unit.kilocalorie / unit.mole / unit.angstrom**2,
         )
-        param_dict = p1.to_dict()
-        param_dict_unitless, attached_units = detach_units(
-            param_dict, output_units={"length_unit": unit.nanometer}
-        )
-        assert attached_units["length_unit"] == unit.nanometer
-        assert abs(param_dict_unitless["length"] - 0.102) < 1e-10
 
-    def test_bondtype_to_dict_invalid_output_units(self):
-        """
-        Test ParameterType to_dict with invalid output units.
-        """
-        p1 = BondHandler.BondType(
-            smirks="[*:1]-[*:2]",
-            length=1.02 * unit.angstrom,
-            k=5 * unit.kilocalorie / unit.mole / unit.angstrom**2,
-        )
         param_dict = p1.to_dict()
-        with pytest.raises(
-            ValueError,
-            match="Requested output unit cal.* is not compatible with quantity unit angstrom.",
-        ):
-            param_dict_unitless, attached_units = detach_units(
-                param_dict, output_units={"length_unit": unit.calorie}
-            )
+
+        assert abs(param_dict["length"].m_as(unit.nanometer) - 0.102) < 1e-10
 
     def test_read_write_optional_parameter_attribute(self):
         """
@@ -1916,7 +1887,6 @@ class TestVirtualSiteHandler:
         ],
     )
     def test_parent_index(self, parameter, expected_index):
-
         assert parameter.parent_index == expected_index
         assert (
             VirtualSiteHandler.VirtualSiteType.type_to_parent_index(parameter.type)
@@ -2017,7 +1987,6 @@ class TestVirtualSiteHandler:
         ],
     )
     def test_add_default_init_kwargs_validation(self, kwargs, expected_raises):
-
         with expected_raises:
             VirtualSiteHandler.VirtualSiteType._add_default_init_kwargs(kwargs)
 
@@ -2062,7 +2031,6 @@ class TestVirtualSiteHandler:
         ],
     )
     def test_add_default_init_kwargs_values(self, kwargs, expected_kwargs):
-
         assert kwargs != expected_kwargs
         VirtualSiteHandler.VirtualSiteType._add_default_init_kwargs(kwargs)
         assert kwargs == expected_kwargs
@@ -2096,7 +2064,6 @@ class TestVirtualSiteHandler:
         ],
     )
     def test_in_plane_angle_converter(self, parameter, in_plane_angle, expected_raises):
-
         parameter_dict = parameter.to_dict()
         parameter_dict["inPlaneAngle"] = in_plane_angle
 
@@ -2130,7 +2097,6 @@ class TestVirtualSiteHandler:
     def test_out_of_plane_angle_converter(
         self, parameter, out_of_plane_angle, expected_raises
     ):
-
         parameter_dict = parameter.to_dict()
         parameter_dict["outOfPlaneAngle"] = out_of_plane_angle
 
@@ -2139,7 +2105,6 @@ class TestVirtualSiteHandler:
             assert new_parameter.outOfPlaneAngle == out_of_plane_angle
 
     def test_serialize_roundtrip(self):
-
         force_field = ForceField()
 
         handler = force_field.get_parameter_handler("VirtualSites")
@@ -2179,7 +2144,6 @@ class TestVirtualSiteHandler:
     def test_validate_found_match(
         self, smiles, matched_indices, parameter, expected_raises
     ):
-
         molecule = Molecule.from_smiles(smiles, allow_undefined_stereo=True)
         topology: Topology = molecule.to_topology()
 
@@ -2210,7 +2174,7 @@ class TestVirtualSiteHandler:
     @pytest.mark.parametrize(
         "parameters, smiles, expected_matches",
         [
-            # Check that a basic BOndCharge virtual site can be applied
+            # Check that a basic BondCharge virtual site can be applied
             (
                 [VirtualSiteMocking.bond_charge_parameter("[Cl:1]-[C:2]")],
                 "[Cl:2][C:1]([H:3])([H:4])[H:5]",
@@ -2229,7 +2193,7 @@ class TestVirtualSiteHandler:
             # Check that a bond charge vsite can be applied to a symmetric moiety
             (
                 [VirtualSiteMocking.bond_charge_parameter("[C:1]#[C:2]")],
-                "[H:1][C:2]#[C:3][C:4]",
+                "[H:1][C:2]#[C:3][Cl:4]",
                 {(1, 2): {("[C:1]#[C:2]", "EP")}, (2, 1): {("[C:1]#[C:2]", "EP")}},
             ),
             # Check that a monovalent lone pair vsite can be applied to a relatively symmetric moiety
@@ -2322,7 +2286,6 @@ class TestVirtualSiteHandler:
         smiles: str,
         expected_matches: Dict[Tuple[int, ...], List[Tuple[str, str]]],
     ):
-
         molecule = Molecule.from_mapped_smiles(smiles, allow_undefined_stereo=True)
 
         handler = VirtualSiteHandler(version="0.3")
@@ -2343,7 +2306,6 @@ class TestVirtualSiteHandler:
         assert {**matched_smirks} == expected_matches
 
     def test_find_matches_multiple_molecules(self):
-
         topology = Topology.from_molecules(
             [
                 Molecule.from_mapped_smiles("[Cl:2][C:1]([H:3])([H:4])[H:5]"),
@@ -2395,7 +2357,6 @@ class TestVirtualSiteHandler:
         ],
     )
     def test_index_of_parameter(self, query_parameter, query_key, expected_index):
-
         handler = VirtualSiteHandler(version="0.3")
 
         for parameter in [
@@ -2723,6 +2684,4 @@ class TestParameterTypeReExports:
 # TODO: test_parametertype_unit_setattr
 # TODO: test_optional_attribs
 # TODO: test_optional_indexed_attribs
-# TODO: test_attach_units
-# TODO: test_detach_units
 # TODO: test_(X)handler_compatibility, where X is all handlers
