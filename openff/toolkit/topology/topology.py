@@ -1314,7 +1314,6 @@ class Topology(Serializable):
 
     @classmethod
     @requires_package("openmm")
-<<<<<<< HEAD
     def from_pdb_and_monomer_info(
         cls,
         file_path: str,
@@ -1448,14 +1447,6 @@ class Topology(Serializable):
     @classmethod
     @requires_package("openmm")
     def from_openmm(cls, openmm_topology, unique_molecules=None):
-=======
-    def from_openmm(
-        cls,
-        openmm_topology: "openmm.app.Topology",
-        unique_molecules: Optional[Iterable[FrozenMolecule]] = None,
-        positions: Union[None, Quantity, "OMMQuantity"] = None,
-    ) -> "Topology":
->>>>>>> main
         """
         Construct an OpenFF Topology object from an OpenMM Topology object.
 
