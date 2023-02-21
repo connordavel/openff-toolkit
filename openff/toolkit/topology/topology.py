@@ -1351,30 +1351,29 @@ class Topology(Serializable):
                 and should be considered an error.
             """
             import networkx as nx
-            from openmm.app import PDBFile
+            # from openmm.app import PDBFile
 
-            pdb = PDBFile(pdb_file)
-            openmm_topology = pdb.topology
+            # pdb = PDBFile(pdb_file)
+            topology = Chem.rdmolfiles.MolFromPDBFile(pdb_file, sanitize=False, removeHs=False)
 
             omm_topology_G = nx.Graph()
-            for atom, position in zip(openmm_topology.atoms(), pdb.positions):
-                vec = position._value
+            for atom, position in zip(topology.GetAtoms(), topology.GetConformer().GetPositions()):
                 omm_topology_G.add_node(
-                    atom.index,
-                    pos=list(vec),
-                    pdb_atom_id=atom.index,  # this remains constant throughout any index reordering
-                    atomic_number=atom.element.atomic_number,
+                    atom.GetIdx(),
+                    pos=list(position),
+                    pdb_atom_id=atom.GetIdx(),  # this remains constant throughout any index reordering
+                    atomic_number=atom.GetAtomicNum(),
                     formal_charge=0.0,
-                    atom_name=atom.name,
-                    residue_name=atom.residue.name,
-                    residue_number=atom.residue.index,
+                    atom_name=atom.GetMonomerInfo().GetName(),
+                    residue_name=atom.GetMonomerInfo().GetResidueName(),
+                    residue_number=atom.GetMonomerInfo().GetResidueNumber(),
                 )
 
-            n_hydrogens = [0] * openmm_topology.getNumAtoms()
-            for bond in openmm_topology.bonds():
+            n_hydrogens = [0] * topology.GetNumAtoms()
+            for bond in topology.GetBonds():
                 omm_topology_G.add_edge(
-                    bond.atom1.index,
-                    bond.atom2.index,
+                    bond.GetEndAtomIdx(),
+                    bond.GetBeginAtomIdx(),
                     bond_order=Chem.rdchem.BondType.UNSPECIFIED,  # bond.order
                 )
                 # omm_topology_G.add_edge(
@@ -1385,16 +1384,16 @@ class Topology(Serializable):
                 # Assign sequential negative numbers as atomic numbers for hydrogens attached to the same heavy atom.
                 # We do the same to the substructure templates that are used for matching. This saves runtime because
                 # it removes redundant self-symmetric matches.
-                if bond.atom1.element.atomic_number == 1:
-                    h_index = bond.atom1.index
-                    heavy_atom_index = bond.atom2.index
+                if bond.GetBeginAtom().GetAtomicNum() == 1:
+                    h_index = bond.GetBeginAtomIdx()
+                    heavy_atom_index = bond.GetEndAtomIdx()
                     n_hydrogens[heavy_atom_index] += 1
                     omm_topology_G.nodes[h_index]["atomic_number"] = (
                         -1 * n_hydrogens[heavy_atom_index]
                     )
-                if bond.atom2.element.atomic_number == 1:
-                    h_index = bond.atom2.index
-                    heavy_atom_index = bond.atom1.index
+                if bond.GetEndAtom().GetAtomicNum() == 1:
+                    h_index = bond.GetEndAtomIdx()
+                    heavy_atom_index = bond.GetBeginAtomIdx()
                     n_hydrogens[heavy_atom_index] += 1
                     omm_topology_G.nodes[h_index]["atomic_number"] = (
                         -1 * n_hydrogens[heavy_atom_index]
