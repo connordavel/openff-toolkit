@@ -3897,7 +3897,6 @@ class FrozenMolecule(Serializable):
             else:
                 return -1, -1
 
-
         def _find_fitting_lists(isomorphism_info):
             # return the indices of the lists that can be appended together to create a longer list
             # with no overlapping values in those lists
@@ -3910,9 +3909,9 @@ class FrozenMolecule(Serializable):
                 max_val = max(all_values)
                 min_val = min(all_values)
                 # create a matrix to find atom overlaps
-                matrix_data = []
+                matrix = np.zeros((len(isomorphism_info), max_val+1))
                 adjacency_list = []
-                for isomorphism in isomorphism_info:
+                for idx, isomorphism in enumerate(isomorphism_info):
                     iso_ids, adjacencies = isomorphism
                     cap_ids = []
                     adjacencies_tupled = [] # adjacencies in tuple form for easier searching
@@ -3922,33 +3921,22 @@ class FrozenMolecule(Serializable):
                         adjacencies_tupled.append(tuple([edge_atom, cap_atom, bond_type]))
                     adjacency_list.append(adjacencies_tupled)
 
-                    row = []
-                    for i in range(0, max_val+1):
-                        if i in iso_ids and i not in cap_ids:
-                            row.append(1)
-                        else:
-                            row.append(0)
-                    matrix_data.append(row)
+                    matrix[idx, list(set(iso_ids)-set(cap_ids))] = 1
                     
 
                 # matrix_data and adjacency_list are parallel to eachother
                 # each item in adjacency_list corresponds to the isomorphism found in the 
                 # corresponding row of matrix_data
-                matrix = np.matrix(matrix_data)
                 n_rows, n_cols = matrix.shape
                 G = nx.Graph()
+                all_bonds = []
                 for iso_id, isomorphism in enumerate(adjacency_list):
                     n_atoms = len(isomorphism_info[iso_id][0])
-                    cap_atoms = []
+
                     neighbors = []
                     for bond in isomorphism:
                         edge_a, cap_a, bond_type = bond
-                        cap_atoms.append(cap_a)
-                        neighbor_bond = (cap_a, edge_a, bond_type)
-                        for neighbor_id, neighbor_isomorphism in enumerate(adjacency_list):
-                            for bond in neighbor_isomorphism:
-                                if neighbor_bond == bond:
-                                    neighbors.append(tuple([neighbor_id, bond_type, edge_a]))
+                        all_bonds.append((edge_a, cap_a, bond_type, iso_id))
 
                     row, = np.nonzero(np.squeeze(np.asarray(matrix[iso_id, :])))
                     row = list(row)
@@ -3963,41 +3951,46 @@ class FrozenMolecule(Serializable):
                         bonds = isomorphism,
                         n_atoms = n_atoms
                     )
-                    for n_id, bond_type, edge_a in neighbors:
+                for bond1, bond2 in itertools.combinations(all_bonds, 2):
+                    edge_a1, cap_a1, bond_type1, iso_id1 = bond1
+                    edge_a2, cap_a2, bond_type2, iso_id2 = bond2
+                    if (edge_a2, cap_a2, bond_type2) == (cap_a1, edge_a1, bond_type1):
                         G.add_edge(
-                            iso_id,
-                            n_id,
-                            order = bond_type
+                            iso_id1,
+                            iso_id2,
+                            order = bond_type1
                         )
+
                 return G
 
-            def _traverse(queue, graph, found_nodes, found_edges):
-                # searches for isomorphisms that fit together based on isomorphism adjacency info: 
-                if queue == []:
-                    return found_nodes
-                v = queue.pop(0)
-                found_nodes.append(v)
-                for bond in graph.nodes[v]['bonds']:
-                    edge_a, cap_a, bond_type = bond
-                    if {edge_a, cap_a} in found_edges:
-                        continue
-                    selected_neighbor = -1
-                    for neighbor in graph.neighbors(v):
-                        # make sure this is the neighbor with the correct bond info
-                        neighbor_node = graph.nodes[neighbor]
-                        if len(set(neighbor_node['overlaps'] + [neighbor]) & set(found_nodes + queue)) > 0: # the set overlaps 
+            def _traverse(starting_queue, graph):
+                found_nodes = []
+                found_edges = []
+                queue = starting_queue
+                while len(queue) > 0:
+                    if queue == []:
+                        return found_nodes
+                    v = queue.pop(0)
+                    found_nodes.append(v)
+                    for bond in graph.nodes[v]['bonds']:
+                        edge_a, cap_a, bond_type = bond
+                        if {edge_a, cap_a} in found_edges:
                             continue
-                        if (cap_a, edge_a, bond_type) not in neighbor_node['bonds']:
-                            continue
-                        if neighbor_node['selected'] == True:
-                            selected_neighbor = -1
-                            break
-                        selected_neighbor = neighbor
-                    if selected_neighbor >= 0:
-                        queue.append(selected_neighbor)
-                        found_edges.append({edge_a, cap_a})
-            
-                return _traverse(queue, graph, found_nodes, found_edges)
+                        selected_neighbor = -1
+                        for neighbor in graph.neighbors(v):
+                            # make sure this is the neighbor with the correct bond info
+                            neighbor_node = graph.nodes[neighbor]
+                            if (cap_a, edge_a, bond_type) not in neighbor_node['bonds']:
+                                continue
+                            if neighbor_node['selected'] == True:
+                                selected_neighbor = -1
+                                break
+                            selected_neighbor = neighbor
+                        if selected_neighbor >= 0:
+                            queue.append(selected_neighbor)
+                            found_edges.append({edge_a, cap_a})
+
+                return found_nodes
 
             # first, find unique rows to start the recursive algorithm
             # we only want one unique_col for each unique_row_ids
@@ -4009,7 +4002,7 @@ class FrozenMolecule(Serializable):
                 subgraph = choice_G.subgraph(chain)
                 not_searched_nodes = list(subgraph.nodes)
                 while len(not_searched_nodes) != 0:
-                    unique_group = _traverse([not_searched_nodes[0]], subgraph, [], [])
+                    unique_group = _traverse([not_searched_nodes[0]], subgraph)
                     new_tally = 0
                     old_tally = 0
                     overlapping_nodes = []
@@ -4042,7 +4035,6 @@ class FrozenMolecule(Serializable):
                     largest_mapping_group.append(node)
             return largest_mapping_group
                
-       
         #MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM
         #                 END OF HELPER FUNCTIONS
         #WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW
@@ -4076,6 +4068,7 @@ class FrozenMolecule(Serializable):
                     atom_id = atom.GetIdx()
                     rdmol_copy = deepcopy(rdmol)
                     atom_copy = rdmol_copy.GetAtomWithIdx(atom_id)
+                    atom_copy.SetAtomMapNum(0)
                     # should only have one neighbor
                     next_monomer_connection = None
                     for neighbor in atom_copy.GetNeighbors():
