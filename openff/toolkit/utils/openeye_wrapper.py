@@ -173,7 +173,7 @@ class OpenEyeToolkitWrapper(base_wrapper.ToolkitWrapper):
         for tool, license_func in cls._license_functions.items():
             try:
                 module = importlib.import_module("openeye." + tool)
-            except (ImportError, ModuleNotFoundError):
+            except ImportError:
                 continue
             else:
                 if getattr(module, license_func)():
@@ -203,7 +203,7 @@ class OpenEyeToolkitWrapper(base_wrapper.ToolkitWrapper):
                     cls._is_installed = True
                     try:
                         importlib.import_module("openeye." + tool)
-                    except (ImportError, ModuleNotFoundError):
+                    except ImportError:
                         cls._is_installed = False
             if cls._is_installed:
                 if cls._is_licensed:
@@ -594,7 +594,7 @@ class OpenEyeToolkitWrapper(base_wrapper.ToolkitWrapper):
         if (file_format.lower() == "sdf") and oemol.NumConfs() > 1:
             conf1 = [conf for conf in oemol.GetConfs()][0]
             flat_coords = list()
-            for idx, coord in conf1.GetCoords().items():
+            for coord in conf1.GetCoords().values():
                 flat_coords.extend(coord)
             oemol.DeleteConfs()
             oecoords = oechem.OEFloatArray(flat_coords)
@@ -2788,7 +2788,7 @@ def requires_openeye_module(module_name):
         def wrapper(*args, **kwargs):
             try:
                 module = importlib.import_module("openeye." + module_name)
-            except (ImportError, ModuleNotFoundError):
+            except ImportError:
                 # TODO: Custom exception
                 raise Exception("openeye." + module_name)
             try:

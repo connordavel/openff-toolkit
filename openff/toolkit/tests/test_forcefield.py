@@ -1061,7 +1061,7 @@ class TestForceField(_ForceFieldFixtures):
                 # Ensure that, for example, F isn't converted to Farad
                 if (
                     parameter_handler_name == "LibraryCharges"
-                    and getattr(parameter, "name") is not None
+                    and parameter.name is not None
                 ):
                     assert isinstance(parameter.name, str)
                     assert not isinstance(parameter.name, unit.Quantity)
@@ -1958,6 +1958,23 @@ class TestForceField(_ForceFieldFixtures):
         assert BogusHandler in force_field._parameter_handler_classes.values()
 
         assert force_field["bogus"] is not None
+
+
+class TestForceFieldPluginLoading:
+    def test_handlers_tracked_if_already_loaded(self):
+        """Reproduce issue #1542."""
+        from openff.toolkit.typing.engines.smirnoff.plugins import load_handler_plugins
+
+        plugins = load_handler_plugins()
+
+        assert (
+            len(plugins) > 0
+        ), "Test assumes that some ParameterHandler plugins are available"
+
+        assert ForceField(load_plugins=False)._plugin_parameter_handler_classes == []
+        assert ForceField(load_plugins=True)._plugin_parameter_handler_classes == [
+            *plugins
+        ]
 
 
 class TestForceFieldSerializaiton(_ForceFieldFixtures):
@@ -3271,9 +3288,7 @@ class TestForceFieldParameterAssignment(_ForceFieldFixtures):
             # Leave the fourth molecule where it is.
         ]
         current_atom_idx = 0
-        for mol_idx, (translate_vector, mol) in enumerate(
-            zip(translate_vectors, molecules)
-        ):
+        for translate_vector, mol in zip(translate_vectors, molecules):
             n_mol_atoms = len(mol.atoms)
             positions[
                 current_atom_idx : current_atom_idx + n_mol_atoms
