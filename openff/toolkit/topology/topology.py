@@ -1313,7 +1313,6 @@ class Topology(Serializable):
         return omm_topology_G
 
     @classmethod
-    @requires_package("openmm")
     def from_pdb_and_monomer_info(
         cls,
         file_path: str,

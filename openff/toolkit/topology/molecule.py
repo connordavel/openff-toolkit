@@ -4049,152 +4049,155 @@ class FrozenMolecule(Serializable):
         # and inter-monomer bonds
         substructure_smarts = []
         monomers = monomer_info_dict["monomers"]
-        caps = monomer_info_dict["caps"]
+        # caps = monomer_info_dict["caps"]
         charges = monomer_info_dict.get("charges", dict())
 
         substructure_isomorphism_info = []
         substructure_isomorphism_names = []
         substructure_isomorphisms = []
         substructure_rdmols = {}
+        # for name, monomer_smarts in monomers.items():
+        #     rdmol = Chem.MolFromSmarts(monomer_smarts)
+        #     monomer_caps = caps.get(name, []) # list 
+        #     cap_groups = []
+        #     # the default "cap" is the intermonomer bond represented with wildtype atoms
+        #     for atom in rdmol.GetAtoms():
+        #         if atom.GetAtomicNum() == 0:
+        #             atom_id = atom.GetIdx()
+        #             rdmol_copy = deepcopy(rdmol)
+        #             atom_copy = rdmol_copy.GetAtomWithIdx(atom_id)
+        #             atom_copy.SetAtomMapNum(0)
+        #             # should only have one neighbor
+        #             next_monomer_connection = None
+        #             for neighbor in atom_copy.GetNeighbors():
+        #                 if neighbor.GetAtomMapNum() > 0: # if connected to intermonomer bond
+        #                     next_monomer_connection = neighbor
+        #             next_monomer_connection.SetAtomicNum(0)
+        #             atom_map_num = next_monomer_connection.GetAtomMapNum()
+        #             next_monomer_connection.SetQuery(Chem.AtomFromSmarts("[*]"))
+        #             next_monomer_connection.SetAtomMapNum(atom_map_num)
+        #             ids_to_include = [atom.GetIdx(), next_monomer_connection.GetIdx()]
+        #             cap_smarts = Chem.MolFragmentToSmarts(rdmol_copy, atomsToUse = ids_to_include)
+        #             cap_groups.append(tuple([atom_map_num, [cap_smarts]]))
+        #     # also add end-of-polymer caps that are specified
+        #     for cap_smarts in monomer_caps:
+        #         cap_rdmol = Chem.MolFromSmarts(cap_smarts)
+        #         # find with atom on the monomer the cap bonds to
+        #         for atom in cap_rdmol.GetAtoms():
+        #             if atom.GetAtomicNum() == 0:
+        #                 for map_num, cap_smarts_list in cap_groups:
+        #                     if atom.GetAtomMapNum() == map_num:
+        #                         cap_smarts_list.append(cap_smarts)
+        #                 break
+        #     # enumerate all combinations of the cap_groups
+        #     cap_groups = [set(l) for map_num, l in cap_groups]
+        #     deduplified_groups = []
+        #     [deduplified_groups.append(i) for i in cap_groups if i not in deduplified_groups]
+        #     deduplified_groups = [list(i) for i in deduplified_groups]
+        #     name_id = 0
+        #     for iters in itertools.product(*cap_groups): # enumerate all combinations of cap_groups
+        #         name_id += 1
+        #         if name_id != 1:
+        #             cap_group_name = name + "_CAP" + str(name_id)
+        #         else:
+        #             cap_group_name = name
+        #         # first, remove all wildtype atoms
+        #         nonwildtype_atoms = []
+        #         for atom in rdmol.GetAtoms():
+        #             if atom.GetAtomicNum() > 0:
+        #                 nonwildtype_atoms.append(atom.GetIdx())
+        #         substructure_smarts = Chem.MolFragmentToSmarts(rdmol, atomsToUse = nonwildtype_atoms)
+        #         substructure = Chem.MolFromSmarts(substructure_smarts)
+        #         # attach caps to the substructure (except for intermonomder bonds, which are already present)
+        #         for cap_smarts in iters:
+        #             #TODO: better way of doing this
+        #             # attach the cap smarts to the substructure
+        #             cap_rdmol = Chem.MolFromSmarts(cap_smarts)
+        #             # remove attachment point
+        #             attachment_atom_map_num = -1
+        #             cap_start_id = -1
+        #             cap_ids_to_include = []
+        #             inter_monomer_bond_order = None
+        #             for atom in cap_rdmol.GetAtoms():
+        #                 if atom.GetAtomicNum() == 0 and atom.GetAtomMapNum() > 0:
+        #                     attachment_atom_map_num = atom.GetAtomMapNum()
+        #                     # should have only one neighbor
+        #                     neighbor = atom.GetNeighbors()[0]
+        #                     cap_start_id = neighbor.GetIdx()
+        #                     bond = cap_rdmol.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
+        #                     inter_monomer_bond_order = bond.GetBondType()
+        #                 else:
+        #                     cap_ids_to_include.append(atom.GetIdx())
+        #             # use atom MapNums to identify attachment points
+        #             for atom in cap_rdmol.GetAtoms():
+        #                 if atom.GetIdx() == cap_start_id:
+        #                     atom.SetAtomMapNum(1)
+        #                 else:
+        #                     atom.SetAtomMapNum(0)
+        #             cap_fragment = Chem.MolFragmentToSmarts(cap_rdmol, atomsToUse=cap_ids_to_include)
+        #             cap_rdmol = Chem.MolFromSmarts(cap_fragment)
+        #             for atom in cap_rdmol.GetAtoms():
+        #                 atom.SetAtomMapNum(-atom.GetAtomMapNum())
+        #             # find where to attach the cap_fragment using atom map num
+        #             new_substructure = Chem.CombineMols(substructure, cap_rdmol)
+        #             # find start and end ids for the bond
+        #             start = -1
+        #             end = -1
+        #             for atom in new_substructure.GetAtoms():
+        #                 if atom.GetAtomMapNum() < 0:
+        #                     start = atom.GetIdx()
+        #                 elif atom.GetAtomMapNum() == attachment_atom_map_num:
+        #                     end = atom.GetIdx()
+        #             editable_mol = Chem.EditableMol(new_substructure)
+        #             editable_mol.AddBond(start, end, order = inter_monomer_bond_order)
+        #             substructure = editable_mol.GetMol()
+        #         # with a fully build substructure, search for isomorphisms 
+        #         # if charges are given, add them here
+        #         substructure_rdmols[cap_group_name] = substructure
         for name, monomer_smarts in monomers.items():
-            rdmol = Chem.MolFromSmarts(monomer_smarts)
-            monomer_caps = caps.get(name, []) # list 
-            cap_groups = []
-            # the default "cap" is the intermonomer bond represented with wildtype atoms
-            for atom in rdmol.GetAtoms():
-                if atom.GetAtomicNum() == 0:
-                    atom_id = atom.GetIdx()
-                    rdmol_copy = deepcopy(rdmol)
-                    atom_copy = rdmol_copy.GetAtomWithIdx(atom_id)
-                    atom_copy.SetAtomMapNum(0)
-                    # should only have one neighbor
-                    next_monomer_connection = None
-                    for neighbor in atom_copy.GetNeighbors():
-                        if neighbor.GetAtomMapNum() > 0: # if connected to intermonomer bond
-                            next_monomer_connection = neighbor
-                    next_monomer_connection.SetAtomicNum(0)
-                    atom_map_num = next_monomer_connection.GetAtomMapNum()
-                    next_monomer_connection.SetQuery(Chem.AtomFromSmarts("[*]"))
-                    next_monomer_connection.SetAtomMapNum(atom_map_num)
-                    ids_to_include = [atom.GetIdx(), next_monomer_connection.GetIdx()]
-                    cap_smarts = Chem.MolFragmentToSmarts(rdmol_copy, atomsToUse = ids_to_include)
-                    cap_groups.append(tuple([atom_map_num, [cap_smarts]]))
-            # also add end-of-polymer caps that are specified
-            for cap_smarts in monomer_caps:
-                cap_rdmol = Chem.MolFromSmarts(cap_smarts)
-                # find with atom on the monomer the cap bonds to
-                for atom in cap_rdmol.GetAtoms():
-                    if atom.GetAtomicNum() == 0:
-                        for map_num, cap_smarts_list in cap_groups:
-                            if atom.GetAtomMapNum() == map_num:
-                                cap_smarts_list.append(cap_smarts)
-                        break
-            # enumerate all combinations of the cap_groups
-            cap_groups = [set(l) for map_num, l in cap_groups]
-            deduplified_groups = []
-            [deduplified_groups.append(i) for i in cap_groups if i not in deduplified_groups]
-            deduplified_groups = [list(i) for i in deduplified_groups]
-            name_id = 0
-            for iters in itertools.product(*cap_groups): # enumerate all combinations of cap_groups
-                name_id += 1
-                if name_id != 1:
-                    cap_group_name = name + "_CAP" + str(name_id)
-                else:
-                    cap_group_name = name
-                # first, remove all wildtype atoms
-                nonwildtype_atoms = []
-                for atom in rdmol.GetAtoms():
-                    if atom.GetAtomicNum() > 0:
-                        nonwildtype_atoms.append(atom.GetIdx())
-                substructure_smarts = Chem.MolFragmentToSmarts(rdmol, atomsToUse = nonwildtype_atoms)
-                substructure = Chem.MolFromSmarts(substructure_smarts)
-                # attach caps to the substructure (except for intermonomder bonds, which are already present)
-                for cap_smarts in iters:
-                    #TODO: better way of doing this
-                    # attach the cap smarts to the substructure
-                    cap_rdmol = Chem.MolFromSmarts(cap_smarts)
-                    # remove attachment point
-                    attachment_atom_map_num = -1
-                    cap_start_id = -1
-                    cap_ids_to_include = []
-                    inter_monomer_bond_order = None
-                    for atom in cap_rdmol.GetAtoms():
-                        if atom.GetAtomicNum() == 0 and atom.GetAtomMapNum() > 0:
-                            attachment_atom_map_num = atom.GetAtomMapNum()
-                            # should have only one neighbor
-                            neighbor = atom.GetNeighbors()[0]
-                            cap_start_id = neighbor.GetIdx()
-                            bond = cap_rdmol.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
-                            inter_monomer_bond_order = bond.GetBondType()
-                        else:
-                            cap_ids_to_include.append(atom.GetIdx())
-                    # use atom MapNums to identify attachment points
-                    for atom in cap_rdmol.GetAtoms():
-                        if atom.GetIdx() == cap_start_id:
-                            atom.SetAtomMapNum(1)
-                        else:
-                            atom.SetAtomMapNum(0)
-                    cap_fragment = Chem.MolFragmentToSmarts(cap_rdmol, atomsToUse=cap_ids_to_include)
-                    cap_rdmol = Chem.MolFromSmarts(cap_fragment)
-                    for atom in cap_rdmol.GetAtoms():
-                        atom.SetAtomMapNum(-atom.GetAtomMapNum())
-                    # find where to attach the cap_fragment using atom map num
-                    new_substructure = Chem.CombineMols(substructure, cap_rdmol)
-                    # find start and end ids for the bond
-                    start = -1
-                    end = -1
-                    for atom in new_substructure.GetAtoms():
-                        if atom.GetAtomMapNum() < 0:
-                            start = atom.GetIdx()
-                        elif atom.GetAtomMapNum() == attachment_atom_map_num:
-                            end = atom.GetIdx()
-                    editable_mol = Chem.EditableMol(new_substructure)
-                    editable_mol.AddBond(start, end, order = inter_monomer_bond_order)
-                    substructure = editable_mol.GetMol()
-                # with a fully build substructure, search for isomorphisms 
-                # if charges are given, add them here
-                substructure_rdmols[cap_group_name] = substructure
-                is_isomorphic, isomorphisms = _get_isomorphisms(substructure, omm_topology_G)
-                # for convenience, find with ids correspond to inter-monomer-bonds
-                inter_monomer_bonds = {}
-                for bond in substructure.GetBonds():
-                    if bond.GetBeginAtom().GetAtomicNum() == 0:
-                        inter_monomer_bonds[tuple([bond.GetEndAtomIdx(), bond.GetBeginAtomIdx()])] = bond.GetBondType()
-                    elif bond.GetEndAtom().GetAtomicNum() == 0:
-                        inter_monomer_bonds[tuple([bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()])] = bond.GetBondType()
-                if is_isomorphic:
-                    # build the isomorphisms information to use in `find_fitting_lists`
-                    isomorphisms = list(isomorphisms)
-                    iso_keys = [set(d.keys()) for d in isomorphisms]
-                    deduplified_iso_ids = dict()
-                    # [deduplified_iso_ids.update({id: l}) for id, l in zip(range(0,len(isomorphisms)), iso_keys) if l not in deduplified_iso_ids.values()]
-                    [deduplified_iso_ids.update({id: l}) for id, l in zip(range(0,len(isomorphisms)), iso_keys)]
-                    # for each, get the isomorphism keys and inter-monomer-bond info (all bonds with wildtype atoms)
-                    # zip together isomorhpism keys and bond info
-                    deduplified_isos = [isomorphisms[i] for i in deduplified_iso_ids.keys()]
-                    inter_monomer_bond_mapping = []
-                    isomorphism_map_ids = []
-                    for iso in deduplified_isos:
-                        # get inter_monomer_bond info
-                        inv_map = {a: b for b, a in iso.items()}
-                        bond_dict = {}
-                        wildtypes = set()
-                        for bond, bond_type in inter_monomer_bonds.items():
-                            bond_start, bond_end = bond
-                            map_start = inv_map[bond_start]
-                            map_end = inv_map[bond_end]
-                            wildtypes.add(map_end)
-                            bond_dict[tuple([map_start, map_end])] = bond_type #order is important!
-                        inter_monomer_bond_mapping.append(bond_dict)
+            substructure = Chem.MolFromSmarts(monomer_smarts)
+            substructure_rdmols[name] = substructure
+            is_isomorphic, isomorphisms = _get_isomorphisms(substructure, omm_topology_G)
+            # for convenience, find with ids correspond to inter-monomer-bonds
+            inter_monomer_bonds = {}
+            for bond in substructure.GetBonds():
+                if bond.GetBeginAtom().GetAtomicNum() == 0:
+                    inter_monomer_bonds[tuple([bond.GetEndAtomIdx(), bond.GetBeginAtomIdx()])] = bond.GetBondType()
+                elif bond.GetEndAtom().GetAtomicNum() == 0:
+                    inter_monomer_bonds[tuple([bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()])] = bond.GetBondType()
+            if is_isomorphic:
+                # build the isomorphisms information to use in `find_fitting_lists`
+                isomorphisms = list(isomorphisms)
+                iso_keys = [set(d.keys()) for d in isomorphisms]
+                deduplified_iso_ids = dict()
+                # [deduplified_iso_ids.update({id: l}) for id, l in zip(range(0,len(isomorphisms)), iso_keys) if l not in deduplified_iso_ids.values()]
+                [deduplified_iso_ids.update({id: l}) for id, l in zip(range(0,len(isomorphisms)), iso_keys)]
+                # for each, get the isomorphism keys and inter-monomer-bond info (all bonds with wildtype atoms)
+                # zip together isomorhpism keys and bond info
+                deduplified_isos = [isomorphisms[i] for i in deduplified_iso_ids.keys()]
+                inter_monomer_bond_mapping = []
+                isomorphism_map_ids = []
+                for iso in deduplified_isos:
+                    # get inter_monomer_bond info
+                    inv_map = {a: b for b, a in iso.items()}
+                    bond_dict = {}
+                    wildtypes = set()
+                    for bond, bond_type in inter_monomer_bonds.items():
+                        bond_start, bond_end = bond
+                        map_start = inv_map[bond_start]
+                        map_end = inv_map[bond_end]
+                        wildtypes.add(map_end)
+                        bond_dict[tuple([map_start, map_end])] = bond_type #order is important!
+                    inter_monomer_bond_mapping.append(bond_dict)
 
-                        ids = set(iso.keys())
-                        isomorphism_map_ids.append(list(ids - wildtypes))
-                    isomorphism_info = list(zip(isomorphism_map_ids, inter_monomer_bond_mapping))
-                    substructure_isomorphisms += deduplified_isos
-                    substructure_isomorphism_info += isomorphism_info
-                    substructure_isomorphism_names += [cap_group_name] * len(isomorphism_info)#  TODO: better way to do this
-                else:
-                    continue
+                    ids = set(iso.keys())
+                    isomorphism_map_ids.append(list(ids - wildtypes))
+                isomorphism_info = list(zip(isomorphism_map_ids, inter_monomer_bond_mapping))
+                substructure_isomorphisms += deduplified_isos
+                substructure_isomorphism_info += isomorphism_info
+                substructure_isomorphism_names += [name] * len(isomorphism_info)#  TODO: better way to do this
+            else:
+                continue
         assert len(substructure_isomorphisms) == len(substructure_isomorphism_info) == len(substructure_isomorphism_names)
         # at this point, should have lists of isomorphisms and what rdmols/substructures each corresponds to
         # now, sort the isomorphisms using _find_fitting_lists
