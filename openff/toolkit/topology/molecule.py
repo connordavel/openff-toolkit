@@ -66,6 +66,8 @@ from openff.toolkit.utils.exceptions import (
     RemapIndexError,
     SmilesParsingError,
     UnsupportedFileTypeError,
+    ConflictingMonomerAtomError,
+    ConflictingMonomerBondError
 )
 from openff.toolkit.utils.serialization import Serializable
 from openff.toolkit.utils.toolkits import (
@@ -3786,7 +3788,7 @@ class FrozenMolecule(Serializable):
 
     @classmethod
     @requires_package("openmm")
-    def from_omm_topology_G(cls, omm_topology_G, monomer_info_json = "", verbose=False):
+    def from_omm_topology_G(cls, omm_topology_G, monomer_info_json = "", partition=True, verbose=False):
         import networkx as nx
         from networkx.algorithms import isomorphism
         from rdkit import Chem
@@ -4056,7 +4058,7 @@ class FrozenMolecule(Serializable):
         substructure_isomorphism_names = []
         substructure_isomorphisms = []
         substructure_rdmols = {}
-        
+
         for name, monomer_smarts in monomers.items():
             substructure = Chem.MolFromSmarts(monomer_smarts)
             substructure_rdmols[name] = substructure
@@ -4104,10 +4106,10 @@ class FrozenMolecule(Serializable):
         assert len(substructure_isomorphisms) == len(substructure_isomorphism_info) == len(substructure_isomorphism_names)
         # at this point, should have lists of isomorphisms and what rdmols/substructures each corresponds to
         # now, sort the isomorphisms using _find_fitting_lists
-        if len(substructure_isomorphism_info) > 0:
+        fitted_isomorphism_ids = []
+        if len(substructure_isomorphism_info) > 0 and partition:
             fitted_isomorphism_ids = _find_fitting_lists(substructure_isomorphism_info)
-        else:
-            fitted_isomorphism_ids = []
+
         _bondtypes = {
                 # 0: Chem.BondType.AROMATIC,
                 Chem.BondType.SINGLE: 1,
@@ -4129,7 +4131,7 @@ class FrozenMolecule(Serializable):
                 if rdmol_G.nodes[rdk_idx]["atomic_number"] != 0:
                     nonzero_omm_ids.append(omm_idx)
             iso_selected = False
-            if iso_id in fitted_isomorphism_ids:
+            if not partition or iso_id in fitted_isomorphism_ids:
                 iso_selected = True
                 residue_number_counter += 1
                 # for each, attempt to fill out the networkx representation of the the pdb
