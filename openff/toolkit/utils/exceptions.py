@@ -332,6 +332,11 @@ class MultipleMoleculesInPDBError(OpenFFToolkitException):
 class WrongShapeError(OpenFFToolkitException):
     """Error raised when an array of the wrong shape is found"""
 
+class ConflictingMonomerAtomError(OpenFFToolkitException):
+    """Error raised when two monomers disagree on the chemical info to be assigned in a chemical graph atom"""
+
+class ConflictingMonomerBondError(OpenFFToolkitException):
+    """Error raised when two monomers disagree on the chemical info to be assigned in a chemical graph bond"""
 
 class UnassignedChemistryInPDBError(OpenFFToolkitException, ValueError):
     """
